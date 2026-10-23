@@ -16,7 +16,7 @@ The interface follows your Windows display language (Traditional Chinese or Engl
 
 1. Downloads Discord's public list of detectable games, which includes each game's executable name.
 2. Builds a tiny window program with the C# compiler that ships with Windows (`csc.exe`).
-3. Copies that program under a game's executable name and runs it. The Discord app sees it and shows "Playing <game>".
+3. Copies that program under a game's executable name and runs it. The Discord app sees it and shows "Playing" with that game's name.
 
 It doesn't need your Discord token and doesn't modify the Discord app. Nothing is sent to Discord except what the official app already reports when it detects a game.
 
