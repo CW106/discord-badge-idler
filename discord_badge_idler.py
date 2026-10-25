@@ -55,7 +55,7 @@ except ImportError:  # 少數 Python 安裝沒有 tkinter
 # 基本設定
 # ============================================================================
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 # Discord 公開的「可偵測遊戲清單」。第二個是開源專案 arRPC 收錄的副本，只在第一個連不上時使用。
 DETECTABLE_SOURCES = [
@@ -64,7 +64,9 @@ DETECTABLE_SOURCES = [
 ]
 LIST_MAX_AGE = 24 * 3600          # 遊戲清單超過一天就重新下載
 USER_CLOSED_EXIT_CODE = 2         # 假遊戲視窗被使用者手動關掉時的結束代碼（C# 那邊定義的）
-MAX_PARALLEL = 10                 # 「同時執行」最多幾款
+MAX_PARALLEL = 100                # 「同時執行」最多幾款
+PICK_MODES = ("all", "opened", "unopened")   # 遊戲清單範圍：全部／開過的／沒開過的
+OPENED_MARK = "✓ "                # 清單裡「開過」的遊戲前面加這個記號
 DISCORD_PROCESS_NAMES = {"discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"}
 
 # 三種徽章的等級（名稱, 門檻）
@@ -90,6 +92,8 @@ DEFAULT_SETTINGS = {
     "minimized": False,
     "auto_start": False,
     "stream_current": 0,
+    "hours_pick": "all",          # 時數分頁的遊戲清單範圍
+    "stream_pick": "all",         # 直播分頁的遊戲清單範圍
 }
 
 GREEN, RED, GRAY = "#1a7f37", "#cf222e", "#6e7781"
@@ -174,8 +178,8 @@ STRINGS = {
     "marked_bad": ("「{name}」標記為偵測不到，換一款。",
                    "Marked \"{name}\" as not detected; switching to another game."),
     "no_more_games": ("沒有其他遊戲可以換了。", "There are no other games left to switch to."),
-    "no_unplayed": ("找不到還沒玩過的遊戲了，可以在「遊戲款數」分頁清除紀錄。",
-                    "No unplayed games are left. You can clear the history on the Games played tab."),
+    "no_unplayed": ("找不到還沒開過的遊戲了，可以在「遊戲款數」分頁清除紀錄。",
+                    "No never-opened games are left. You can clear the history on the Games played tab."),
     "only_n_left": ("可以用的新遊戲只剩 {count} 款。", "Only {count} new games are available."),
     "variety_started": ("開始跑款數：共 {total} 款，每款 {duration}，同時 {parallel} 款。",
                         "Games-played mode started: {total} games, {duration} each, {parallel} at once."),
@@ -201,8 +205,15 @@ STRINGS = {
     "random_pick": ("隨機挑一款", "Pick random"),
     "list_loading": ("遊戲清單載入中…", "Loading the game list…"),
     "picked": ("已選：{name}（假程式名稱：{exe}）", "Selected: {name} (dummy file: {exe})"),
-    "search_count": ("符合搜尋的遊戲：{count}{more} 款。沒選的話會隨機挑一款。",
-                     "{count}{more} matching games. If you don't pick one, a random game is used."),
+    "search_count": ("符合條件的遊戲：{count}{more} 款。沒選的話會從這些裡面隨機挑。",
+                     "{count}{more} matching games. If you don't pick one, a random one from these is used."),
+    "filter_label": ("範圍：", "Show:"),
+    "filter_all": ("全部遊戲", "All games"),
+    "filter_opened": ("只看開過的", "Opened before"),
+    "filter_unopened": ("只看沒開過的", "Never opened"),
+    "only_n_matched": ("符合條件的遊戲只有 {count} 款。", "Only {count} games match the filter."),
+    "no_match": ("沒有符合條件的遊戲可以挑，可以把範圍改成「全部遊戲」。",
+                 "No games match the filter. Try switching to \"All games\"."),
 
     # ---- 上方狀態列 ----
     "discord_checking": ("Discord：檢查中…", "Discord: checking…"),
@@ -256,9 +267,9 @@ STRINGS = {
     "hours_max": ("→ 已經是最高等級 Eternal 了！", "→ You're already at the top tier, Eternal!"),
 
     # ---- 遊戲款數分頁 ----
-    "variety_intro": ("自動輪流執行「沒玩過」的遊戲，每款玩幾分鐘就換下一款。"
+    "variety_intro": ("自動輪流執行「沒開過」的遊戲，每款玩幾分鐘就換下一款。"
                       "MAVERICK 60 款 → Polymath 80 款 → Universalist 100 款以上。",
-                      "Cycles through games you haven't played, a few minutes each. "
+                      "Cycles through games the app has never opened, a few minutes each. "
                       "MAVERICK 60 games → Polymath 80 → Universalist 100+."),
     "games_current_label": ("Discord 上目前已玩款數：", "Games played on Discord now:"),
     "games_target_label": ("目標款數：", "Target:"),
@@ -269,7 +280,7 @@ STRINGS = {
                    "When finished, switch to hours mode automatically (using the Game hours tab settings)"),
     "start_variety": ("開始跑款數", "Start games-played mode"),
     "stop_variety": ("停止跑款數", "Stop games-played mode"),
-    "clear_played": ("清除「已玩過」紀錄", "Clear played history"),
+    "clear_played": ("清除「開過」紀錄", "Clear opened history"),
     "tier_games": ("{tier}（{count} 款）", "{tier} ({count} games)"),
     "games_max": ("已經是最高等級了", "already at the top tier"),
     "variety_plan": ("會執行 {total} 款（還差 {need} 款＋備用 {buffer} 款），大約需要 {duration}。\n"
@@ -281,8 +292,8 @@ STRINGS = {
     "variety_part": ("{name}（剩 {time}）", "{name} ({time} left)"),
     "variety_info": ("目前：{parts}\n完成 {done} 款、跳過 {skipped} 款、還有 {queued} 款排隊｜預計還要 {eta}",
                      "Now: {parts}\n{done} done, {skipped} skipped, {queued} queued | about {eta} left"),
-    "played_count": ("已記錄玩過 {count} 款（之後不會重複挑）。",
-                     "{count} games recorded as played (they won't be picked again)."),
+    "played_count": ("已記錄開過 {count} 款（款數模式不會再挑這些）。",
+                     "{count} games recorded as opened (games-played mode won't pick them again)."),
 
     # ---- 直播分頁 ----
     "stream_intro": ("「直播給他人」的時數一定要有人在看才會累積，這個程式沒辦法假造觀眾。\n"
@@ -319,7 +330,8 @@ STRINGS = {
 
 【三種徽章】
 ・遊戲時數：假遊戲在跑、Discord 開著，掛 1 小時就是 1 小時，沒辦法加速。
-・遊戲款數：每款預設跑 15 分鐘就換下一款。跑完的會記下來，之後不會重複挑。
+・遊戲款數：每款預設跑 15 分鐘就換下一款。開過的遊戲都會記下來，款數模式只挑沒開過的。
+・遊戲清單的「範圍」可以切換：全部遊戲／只看開過的／只看沒開過的，隨機挑選也會照這個範圍。
 ・直播時數：一定要有人在看才會算，這個程式只提供可以拿來直播的假遊戲視窗。
 
 【小提醒】
@@ -351,7 +363,9 @@ STRINGS = {
 THE THREE BADGES
 • Game hours: with a dummy game running and Discord open, 1 hour idled is 1 hour. It can't be sped up.
 • Games played: by default each game runs 15 minutes, then the next one starts.
-  Finished games are remembered and never picked again.
+  Every game the app opens is remembered, and this mode only picks games it has never opened.
+• The game list's "Show" menu switches between all games, games opened before, and games never
+  opened. Random picks follow that choice.
 • Streaming: only counts while someone is actually watching. This app only provides a window you can stream.
 
 GOOD TO KNOW
@@ -408,11 +422,11 @@ up more than usual, then decide.
     "confirm_stop_hours": ("正在掛時數，要停止並改成跑款數嗎？\n（跑款數的時候一樣會累積時數）",
                            "Hours mode is running. Stop it and switch to games-played mode?\n"
                            "(Hours still add up during games-played mode.)"),
-    "no_played": ("目前沒有「已玩過」的紀錄。", "There's no played history yet."),
-    "confirm_clear_played": ("要清除 {count} 款「已玩過」紀錄嗎？\n清除後可能會重複挑到這些遊戲。",
-                             "Clear the played history for {count} games?\n"
-                             "Those games may be picked again afterwards."),
-    "cleared_played": ("已清除「已玩過」紀錄。", "Cleared the played history."),
+    "no_played": ("目前沒有「開過」的紀錄。", "There's no opened history yet."),
+    "confirm_clear_played": ("要清除 {count} 款「開過」紀錄嗎？\n清除後款數模式可能會重複挑到這些遊戲。",
+                             "Clear the opened history for {count} games?\n"
+                             "Games-played mode may pick them again afterwards."),
+    "cleared_played": ("已清除「開過」紀錄。", "Cleared the opened history."),
     "bad_empty": ("「偵測不到」名單是空的。", "The \"not detected\" list is empty."),
     "confirm_clear_bad": ("要清除 {count} 款「偵測不到」的遊戲名單嗎？",
                           "Clear {count} games from the \"not detected\" list?"),
@@ -659,13 +673,18 @@ class GameLibrary:
             games.append(Game(app_id, clean_game_name(name), exe))
         return cls(games, len(apps))
 
-    def search(self, text: str, limit: int = 300):
-        """用名稱搜尋：開頭符合的排前面，其次是包含的。"""
+    def search(self, text: str, limit: int = 300, keep=None):
+        """用名稱搜尋：開頭符合的排前面，其次是包含的。keep(game) 回傳 False 的會被排除。"""
         text = text.strip().lower()
-        if not text:
-            return self.games[:limit]
         starts, contains = [], []
         for game in self.games:
+            if keep is not None and not keep(game):
+                continue
+            if not text:
+                starts.append(game)
+                if len(starts) >= limit:
+                    break
+                continue
             lowered = game.name.lower()
             if lowered.startswith(text):
                 starts.append(game)
@@ -789,9 +808,16 @@ namespace BadgeIdler
                 int w = Width + 8;
                 int h = Height + 8;
                 int perColumn = Math.Max(1, (area.Height - 8) / h);
-                int col = slot / perColumn;
-                int row = slot % perColumn;
-                Location = new Point(area.Right - w * (col + 1), area.Bottom - h * (row + 1));
+                int columns = Math.Max(1, (area.Width - 8) / w);
+                int perLayer = perColumn * columns;
+                int layer = slot / perLayer;
+                int index = slot % perLayer;
+                int col = index / perColumn;
+                int row = index % perColumn;
+                int offset = (layer % 8) * 24;
+                int x = Math.Max(area.Left, area.Right - w * (col + 1) - offset);
+                int y = Math.Max(area.Top, area.Bottom - h * (row + 1) - offset);
+                Location = new Point(x, y);
             }
             timer = new System.Windows.Forms.Timer();
             timer.Interval = streamMode ? 40 : 1000;
@@ -1098,6 +1124,7 @@ class State:
     def __init__(self, path: Path):
         self.path = path
         self.played_ids = set()       # 款數模式已經跑完的遊戲
+        self.opened_ids = set()       # 這個程式開過的所有遊戲（任何模式）
         self.bad_ids = set()          # 偵測不到或一直當掉的遊戲，之後不再挑
         self.total_seconds = 0.0      # 這個程式總共掛了多久
         self.settings = dict(DEFAULT_SETTINGS)
@@ -1111,6 +1138,8 @@ class State:
             return
         self.played_ids = {str(x) for x in data.get("played_ids", []) if isinstance(x, (str, int))}
         self.bad_ids = {str(x) for x in data.get("bad_ids", []) if isinstance(x, (str, int))}
+        self.opened_ids = {str(x) for x in data.get("opened_ids", []) if isinstance(x, (str, int))}
+        self.opened_ids |= self.played_ids          # 舊版只有 played_ids
         try:
             self.total_seconds = float(data.get("total_seconds", 0) or 0)
         except (TypeError, ValueError):
@@ -1123,11 +1152,15 @@ class State:
                     self.settings[key] = value
         if self.settings["language"] not in LANGUAGE_CHOICES:
             self.settings["language"] = "auto"
+        for key in ("hours_pick", "stream_pick"):
+            if self.settings[key] not in PICK_MODES:
+                self.settings[key] = "all"
 
     def save(self) -> None:
         data = {
             "played_ids": sorted(self.played_ids),
             "bad_ids": sorted(self.bad_ids),
+            "opened_ids": sorted(self.opened_ids),
             "total_seconds": round(self.total_seconds, 1),
             "settings": self.settings,
         }
@@ -1156,6 +1189,7 @@ class Idler:
         self.slots = []                   # 正在執行的 FakeGame
         self.parallel = 1
         self.minimized = False
+        self.pick_mode = "all"            # 隨機挑遊戲的範圍：all / opened / unopened
         self.session_seconds = 0.0
         # 款數模式
         self.queue = []
@@ -1175,6 +1209,21 @@ class Idler:
 
     def running_ids(self):
         return {fg.game.id for fg in self.slots}
+
+    def pick_games(self, count: int, pick_mode: str = "all", exclude=()):
+        """依照範圍（全部／開過的／沒開過的）隨機挑 count 款，排除 exclude 和偵測不到的遊戲。"""
+        exclude = set(exclude) | self.state.bad_ids
+        opened = self.state.opened_ids
+        pool = []
+        for game in self.library.games:
+            if game.id in exclude:
+                continue
+            if pick_mode == "opened" and game.id not in opened:
+                continue
+            if pick_mode == "unopened" and game.id in opened:
+                continue
+            pool.append(game)
+        return random.sample(pool, min(max(0, int(count)), len(pool)))
 
     def _free_slot(self) -> int:
         used = {fg.slot for fg in self.slots}
@@ -1200,6 +1249,7 @@ class Idler:
             return None
         self._launch_failures = 0
         self.slots.append(fake)
+        self.state.opened_ids.add(game.id)
         self.log(t("now_playing", name=game.name))
         return fake
 
@@ -1209,16 +1259,24 @@ class Idler:
         self._set_awake(True)
 
     # ---------- 時數模式 ----------
-    def start_hours(self, main_game=None, parallel: int = 1, minimized: bool = False) -> bool:
+    def start_hours(self, main_game=None, parallel: int = 1, minimized: bool = False,
+                    pick_mode: str = "all") -> bool:
         if not self.ready:
             return False
         self.stop(quiet=True)
-        self.mode = "hours"
         self.parallel = max(1, min(MAX_PARALLEL, int(parallel)))
         self.minimized = bool(minimized)
+        self.pick_mode = pick_mode if pick_mode in PICK_MODES else "all"
         games = [main_game] if main_game is not None else []
-        exclude = self.state.bad_ids | {g.id for g in games}
-        games += self.library.pick_random(self.parallel - len(games), exclude)
+        need = self.parallel - len(games)
+        picks = self.pick_games(need, self.pick_mode, {g.id for g in games})
+        if len(picks) < need:
+            self.log(t("only_n_matched", count=len(picks)))
+        games += picks
+        if not games:
+            self.log(t("no_match"))
+            return False
+        self.mode = "hours"
         for game in games:
             self._launch(game)
         if not self.slots:
@@ -1238,7 +1296,7 @@ class Idler:
         self.slots.remove(old)
         self.state.bad_ids.add(old.game.id)
         self.log(t("marked_bad", name=old.game.name))
-        picks = self.library.pick_random(1, self.state.bad_ids | self.running_ids())
+        picks = self.pick_games(1, self.pick_mode, self.running_ids())
         if not picks:
             self.log(t("no_more_games"))
             return None
@@ -1254,7 +1312,7 @@ class Idler:
         if not self.ready:
             return False
         self.stop(quiet=True)
-        picks = self.library.pick_random(count, self.state.played_ids | self.state.bad_ids)
+        picks = self.pick_games(count, "unopened", self.state.played_ids)
         if not picks:
             self.log(t("no_unplayed"))
             return False
@@ -1293,7 +1351,8 @@ class Idler:
         self.log(t("variety_finished", done=done, skipped=skipped))
         if then is not None:
             self.log(t("switch_to_hours"))
-            self.start_hours(then.get("game"), then.get("parallel", 1), then.get("minimized", False))
+            self.start_hours(then.get("game"), then.get("parallel", 1), then.get("minimized", False),
+                             then.get("pick_mode", "all"))
 
     def variety_eta_seconds(self) -> float:
         if self.mode != "variety":
@@ -1505,9 +1564,10 @@ class GamePicker(_TkFrame):
     """搜尋框＋遊戲清單，讓使用者挑一款遊戲。"""
     MAX_SHOW = 300
 
-    def __init__(self, master, app, height: int = 7):
+    def __init__(self, master, app, height: int = 7, mode_key=None):
         super().__init__(master)
         self.app = app
+        self.mode_key = mode_key          # 把「範圍」存在設定的哪個欄位
         self.shown = []
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *args: self.refresh())
@@ -1516,6 +1576,10 @@ class GamePicker(_TkFrame):
         row.pack(fill="x")
         app.translate(ttk.Label(row), "search_label").pack(side="left")
         ttk.Entry(row, textvariable=self.search_var).pack(side="left", fill="x", expand=True, padx=4)
+        app.translate(ttk.Label(row), "filter_label").pack(side="left", padx=(4, 2))
+        self.cmb_filter = ttk.Combobox(row, state="readonly", width=12)
+        self.cmb_filter.pack(side="left", padx=(0, 4))
+        self.cmb_filter.bind("<<ComboboxSelected>>", self._on_filter_changed)
         app.translate(ttk.Button(row, command=self.pick_random), "random_pick").pack(side="left")
 
         box = ttk.Frame(self)
@@ -1530,6 +1594,40 @@ class GamePicker(_TkFrame):
         self.hint = ttk.Label(self, text=t("list_loading"), foreground=GRAY)
         self.hint.pack(anchor="w")
 
+        saved = app.state.settings.get(mode_key, "all") if mode_key else "all"
+        self.cmb_filter.configure(values=self._filter_labels())
+        self.cmb_filter.current(PICK_MODES.index(saved) if saved in PICK_MODES else 0)
+
+    @staticmethod
+    def _filter_labels():
+        return [t("filter_all"), t("filter_opened"), t("filter_unopened")]
+
+    def mode(self) -> str:
+        """目前的範圍：all / opened / unopened"""
+        index = self.cmb_filter.current()
+        return PICK_MODES[index] if 0 <= index < len(PICK_MODES) else "all"
+
+    def update_texts(self) -> None:
+        """切換語言時更新下拉選單的文字。"""
+        index = self.cmb_filter.current()
+        self.cmb_filter.configure(values=self._filter_labels())
+        self.cmb_filter.current(index if 0 <= index < len(PICK_MODES) else 0)
+        self.update_hint()
+
+    def _on_filter_changed(self, event=None) -> None:
+        if self.mode_key:
+            self.app.state.settings[self.mode_key] = self.mode()
+            self.app.state.save()
+        self.refresh()
+
+    def _keep(self, game: Game) -> bool:
+        mode = self.mode()
+        if mode == "opened":
+            return game.id in self.app.state.opened_ids
+        if mode == "unopened":
+            return game.id not in self.app.state.opened_ids
+        return True
+
     def refresh(self, ensure=None) -> None:
         library = self.app.library
         self.listbox.delete(0, "end")
@@ -1537,12 +1635,13 @@ class GamePicker(_TkFrame):
         if library is None:
             self.update_hint()
             return
-        results = library.search(self.search_var.get(), self.MAX_SHOW)
+        results = library.search(self.search_var.get(), self.MAX_SHOW, keep=self._keep)
         if ensure is not None and all(g.id != ensure.id for g in results):
             results = [ensure] + results[: self.MAX_SHOW - 1]
         self.shown = results
+        opened = self.app.state.opened_ids
         for game in results:
-            self.listbox.insert("end", game.name)
+            self.listbox.insert("end", (OPENED_MARK if game.id in opened else "") + game.name)
         if ensure is not None:
             for index, game in enumerate(results):
                 if game.id == ensure.id:
@@ -1571,15 +1670,21 @@ class GamePicker(_TkFrame):
         return self.shown[index] if 0 <= index < len(self.shown) else None
 
     def select_game(self, game: Game) -> None:
-        self.search_var.set(game.name)        # 會自動觸發 refresh()
+        """選取一款遊戲（不在目前清單裡的話會放到最上面）。"""
         self.refresh(ensure=game)
+
+    def refresh_keep(self) -> None:
+        """重新整理清單（更新「開過」記號），保留目前選的遊戲。"""
+        self.refresh(ensure=self.selected())
 
     def pick_random(self) -> None:
         if self.app.library is None:
             return
-        picks = self.app.library.pick_random(1, self.app.state.bad_ids)
+        picks = self.app.idler.pick_games(1, self.mode())
         if picks:
             self.select_game(picks[0])
+        else:
+            messagebox.showinfo(t("app_name"), t("no_match"))
 
 
 class App:
@@ -1598,6 +1703,7 @@ class App:
         self.discord_checked = False
         self.stream_game = None
         self._auto_started = False
+        self._opened_seen = -1               # 用來發現「開過」名單有變動，更新清單上的記號
         self._language_updaters = []         # 切換語言時要重新設定文字的元件
         self.idler = Idler(self.state, self.log)
 
@@ -1671,8 +1777,8 @@ class App:
             update()
         self._render_top_labels()
         self._render_help()
-        self.picker_hours.update_hint()
-        self.picker_stream.update_hint()
+        self.picker_hours.update_texts()
+        self.picker_stream.update_texts()
         self._refresh_calcs()
         self._refresh_status()
 
@@ -1761,7 +1867,7 @@ class App:
         self._add_tab(notebook, tab, "tab_hours")
         self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap), "hours_intro").pack(anchor="w")
 
-        self.picker_hours = GamePicker(tab, self, height=7)
+        self.picker_hours = GamePicker(tab, self, height=7, mode_key="hours_pick")
         self.picker_hours.pack(fill="both", expand=True, pady=(8, 6))
 
         row = ttk.Frame(tab)
@@ -1834,7 +1940,7 @@ class App:
         self._add_tab(notebook, tab, "tab_stream")
         self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap), "stream_intro").pack(anchor="w")
 
-        self.picker_stream = GamePicker(tab, self, height=6)
+        self.picker_stream = GamePicker(tab, self, height=6, mode_key="stream_pick")
         self.picker_stream.pack(fill="both", expand=True, pady=(8, 6))
 
         row = ttk.Frame(tab)
@@ -2020,6 +2126,10 @@ class App:
                 self.stream_game.stop()
                 self.stream_game = None
                 self.log(t("stream_window_closed"))
+            if self.library is not None and len(self.state.opened_ids) != self._opened_seen:
+                self._opened_seen = len(self.state.opened_ids)
+                self.picker_hours.refresh_keep()
+                self.picker_stream.refresh_keep()
             self._refresh_status()
         except Exception as exc:
             write_log_file("[ERROR] " + traceback.format_exc())
@@ -2106,7 +2216,7 @@ class App:
             else:
                 self.lbl_variety_info.configure(text="")
             self.btn_variety.configure(text=t("start_variety"))
-        self.lbl_played.configure(text=t("played_count", count=len(self.state.played_ids)))
+        self.lbl_played.configure(text=t("played_count", count=len(self.state.opened_ids)))
 
         # 直播分頁
         if self.stream_game is not None:
@@ -2153,7 +2263,7 @@ class App:
                 return
         game = self.picker_hours.selected()
         parallel = self._int(self.var_hours_parallel, 1, 1, MAX_PARALLEL)
-        if self.idler.start_hours(game, parallel, self.var_minimized.get()):
+        if self.idler.start_hours(game, parallel, self.var_minimized.get(), self.picker_hours.mode()):
             self._save_settings()
         self._refresh_status()
 
@@ -2194,18 +2304,20 @@ class App:
         if self.var_then_hours.get():
             then = {"game": self.picker_hours.selected(),
                     "parallel": self._int(self.var_hours_parallel, 1, 1, MAX_PARALLEL),
-                    "minimized": self.var_minimized.get()}
+                    "minimized": self.var_minimized.get(),
+                    "pick_mode": self.picker_hours.mode()}
         if self.idler.start_variety(need + buffer, minutes, parallel, self.var_minimized.get(), then):
             self._save_settings()
         self._refresh_status()
 
     def clear_played(self) -> None:
-        count = len(self.state.played_ids)
+        count = len(self.state.opened_ids | self.state.played_ids)
         if count == 0:
             messagebox.showinfo(t("app_name"), t("no_played"))
             return
         if messagebox.askyesno(t("app_name"), t("confirm_clear_played", count=count)):
             self.state.played_ids.clear()
+            self.state.opened_ids.clear()
             self.state.save()
             self.log(t("cleared_played"))
             self._refresh_status()
@@ -2228,8 +2340,9 @@ class App:
             return
         game = self.picker_stream.selected()
         if game is None:
-            picks = self.library.pick_random(1, self.state.bad_ids)
+            picks = self.idler.pick_games(1, self.picker_stream.mode())
             if not picks:
+                messagebox.showinfo(t("app_name"), t("no_match"))
                 return
             game = picks[0]
             self.picker_stream.select_game(game)
@@ -2240,6 +2353,7 @@ class App:
             messagebox.showerror(t("app_name"), t("stream_open_failed", error=explain_launch_error(exc)))
             return
         self.stream_game = fake
+        self.state.opened_ids.add(game.id)
         self.log(t("stream_opened", name=game.name))
         self._refresh_status()
 
