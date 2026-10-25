@@ -36,7 +36,8 @@ It doesn't need your Discord token and doesn't modify the Discord app. Nothing i
 
 ### Options
 
-- **Run at once (experimental):** runs several dummy games at the same time. If Discord counts each game separately, hours add up faster. This isn't confirmed, so compare your badge after a day.
+- **Run at once (experimental):** runs up to 100 dummy games at the same time. If Discord counts each game separately, hours add up faster. This isn't confirmed, so compare your badge after a day.
+- **Show** menu in the game list: *All games*, *Opened before*, or *Never opened*. Random picks, including the extra games for *Run at once*, follow it. Games-played mode always uses games the app has never opened.
 - **Open this app when Windows starts** and **Start hours mode when the app opens:** idling resumes by itself after a restart.
 - While idling, the app keeps Windows from going to sleep on its own. The screen can still turn off.
 
