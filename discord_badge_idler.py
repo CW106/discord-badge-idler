@@ -31,6 +31,7 @@ import hashlib
 import json
 import math
 import os
+import platform
 import queue
 import random
 import re
@@ -41,6 +42,7 @@ import threading
 import time
 import traceback
 import urllib.request
+import webbrowser
 from pathlib import Path
 
 try:
@@ -55,7 +57,10 @@ except ImportError:  # 少數 Python 安裝沒有 tkinter
 # 基本設定
 # ============================================================================
 
-VERSION = "1.2"
+VERSION = "1.3"
+
+# 用 Nuitka 或 PyInstaller 打包成 exe 時為 True
+IS_FROZEN = bool(getattr(sys, "frozen", False)) or "__compiled__" in globals()
 
 # Discord 公開的「可偵測遊戲清單」。第二個是開源專案 arRPC 收錄的副本，只在第一個連不上時使用。
 DETECTABLE_SOURCES = [
@@ -68,6 +73,10 @@ MAX_PARALLEL = 100                # 「同時執行」最多幾款
 PICK_MODES = ("all", "opened", "unopened")   # 遊戲清單範圍：全部／開過的／沒開過的
 OPENED_MARK = "✓ "                # 清單裡「開過」的遊戲前面加這個記號
 DISCORD_PROCESS_NAMES = {"discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"}
+# Discord 電腦版的安裝位置（%LOCALAPPDATA%\<資料夾>\Update.exe）
+DISCORD_INSTALLS = (("Discord", "Discord.exe"), ("DiscordPTB", "DiscordPTB.exe"), ("DiscordCanary", "DiscordCanary.exe"))
+DISCORD_DOWNLOAD_URL = "https://discord.com/download"
+DOTNET_DOWNLOAD_URL = "https://dotnet.microsoft.com/download/dotnet-framework/net48"
 
 # 三種徽章的等級（名稱, 門檻）
 HOURS_TIERS = [("Casual", 1), ("Recreational", 5), ("Dedicated", 20), ("Committed", 75), ("Serious", 150),
@@ -152,9 +161,14 @@ STRINGS = {
 
     # ---- 假遊戲執行器 ----
     "csc_missing": ("找不到 Windows 內建的 C# 編譯器 (csc.exe)。\n"
-                    "請確認電腦有 .NET Framework 4（Windows 10/11 預設就有）。",
+                    "請確認電腦有 .NET Framework 4（Windows 10/11 預設就有），或改用 exe 版。",
                     "Couldn't find the C# compiler that ships with Windows (csc.exe).\n"
-                    "Make sure .NET Framework 4 is installed (it is by default on Windows 10/11)."),
+                    "Make sure .NET Framework 4 is installed (it is by default on Windows 10/11), "
+                    "or use the EXE build."),
+    "runner_from_bundle": ("使用程式內附的假遊戲執行器。", "Using the dummy game runner bundled with the app."),
+    "ask_open_dotnet": ("要開啟 .NET Framework 4.8 的下載頁面嗎？", "Open the .NET Framework 4.8 download page?"),
+    "fatal_error": ("程式發生錯誤，沒辦法繼續執行：\n\n{error}\n\n詳細內容存在：{path}",
+                    "The app hit an error and can't continue:\n\n{error}\n\nDetails were saved to: {path}"),
     "compiling": ("第一次使用：正在編譯假遊戲執行器…", "First run: compiling the dummy game runner…"),
     "compile_failed": ("編譯假遊戲執行器失敗：\n{output}", "Failed to compile the dummy game runner:\n{output}"),
     "compiled": ("假遊戲執行器編譯完成。", "Dummy game runner compiled."),
@@ -410,6 +424,40 @@ up more than usual, then decide.
     "runner_not_ready": ("假遊戲執行器還在準備中，請稍等幾秒。",
                          "The dummy game runner is still being prepared. Please wait a few seconds."),
     "library_not_ready": ("遊戲清單還沒載入好，請稍等。", "The game list is still loading. Please wait."),
+    "open_discord": ("開啟 Discord", "Open Discord"),
+    "discord_launching": ("正在開啟 Discord…", "Opening Discord…"),
+    "discord_launch_failed": ("沒辦法開啟 Discord：{error}", "Couldn't open Discord: {error}"),
+    "discord_not_installed": ("這台電腦好像沒有安裝 Discord 電腦版。\n要開啟 Discord 的下載頁面嗎？",
+                              "The Discord desktop app doesn't seem to be installed.\n"
+                              "Open the Discord download page?"),
+    "ask_launch_discord": ("Discord 沒有開，假遊戲不會被記錄。\n要幫你開啟 Discord 嗎？\n\n"
+                           "是：開啟 Discord 並開始\n否：直接開始\n取消：先不要開始",
+                           "Discord isn't running, so dummy games won't be counted.\nOpen Discord for you?\n\n"
+                           "Yes: open Discord and start\nNo: start anyway\nCancel: don't start yet"),
+    "ask_open_discord_now": ("要現在幫你開啟 Discord 嗎？", "Open Discord now?"),
+    "check_fix": ("檢查並修復", "Check & repair"),
+    "checking": ("正在檢查並修復…", "Checking and repairing…"),
+    "check_title": ("檢查結果", "Check results"),
+    "check_all_ok": ("全部正常！", "Everything looks good!"),
+    "chk_app": ("程式：{detail}", "App: {detail}"),
+    "chk_app_exe": ("exe 版（不需要另外安裝 Python）", "EXE build (no separate Python needed)"),
+    "chk_app_py": ("Python {version}，tkinter 正常", "Python {version}, tkinter OK"),
+    "chk_folder_ok": ("資料夾可以寫入", "The data folder is writable"),
+    "chk_folder_fail": ("資料夾沒辦法寫入：{error}", "Can't write to the data folder: {error}"),
+    "chk_runner_ok": ("假遊戲執行器正常", "Dummy game runner OK"),
+    "chk_runner_fixed": ("假遊戲執行器原本不見了，已經重新建立", "The dummy game runner was missing and has been rebuilt"),
+    "chk_runner_fail": ("假遊戲執行器建立失敗：{error}", "Couldn't build the dummy game runner: {error}"),
+    "chk_launch_ok": ("試跑假遊戲成功（沒有被防毒擋下）", "Test launch of a dummy game worked (not blocked by antivirus)"),
+    "chk_launch_fail": ("試跑假遊戲失敗：{error}", "Test launch of a dummy game failed: {error}"),
+    "chk_list_ok": ("遊戲清單正常（{count:,} 款）", "Game list OK ({count:,} games)"),
+    "chk_list_fixed": ("遊戲清單原本沒載入，已經重新下載（{count:,} 款）",
+                       "The game list wasn't loaded; downloaded it again ({count:,} games)"),
+    "chk_list_fail": ("遊戲清單載入失敗：{error}", "Couldn't load the game list: {error}"),
+    "chk_discord_running": ("Discord 正在執行", "Discord is running"),
+    "chk_discord_closed": ("Discord 有安裝，但現在沒有開", "Discord is installed but not running"),
+    "chk_discord_missing": ("找不到 Discord 電腦版", "The Discord desktop app wasn't found"),
+    "chk_discord_unknown": ("沒辦法判斷 Discord 有沒有開", "Couldn't tell whether Discord is running"),
+    "self_test_title": ("自我測試", "Self test"),
     "confirm_no_discord": ("沒有偵測到 Discord 在執行，假遊戲不會被記錄。\n"
                            "（Discord 沒開的時候程式會暫停計時）\n\n還是要開始嗎？",
                            "Discord doesn't seem to be running, so dummy games won't be counted.\n"
@@ -554,6 +602,50 @@ def decode_console(data: bytes) -> str:
         except LookupError:      # 非 Windows 沒有 "oem" 這個編碼
             continue
     return data.decode("latin-1")
+
+
+def write_crash_log(details: str) -> Path:
+    path = DATA_DIR / "crash_log.txt"
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(time.strftime("==== %Y-%m-%d %H:%M:%S ====\n") + details + "\n")
+    except OSError:
+        pass
+    return path
+
+
+def show_native_error(title: str, message: str) -> None:
+    """不靠 tkinter 跳出錯誤視窗（tkinter 壞掉、或 exe 沒有黑色視窗時也看得到）。"""
+    if os.name == "nt":
+        try:
+            ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)
+            return
+        except Exception:
+            pass
+    if sys.stderr is not None:
+        sys.stderr.write(message + "\n")
+
+
+def bundled_file(name: str):
+    """exe 版會把檔案包在程式裡，這裡找出它解開後的位置；找不到回傳 None。"""
+    folders = [Path(__file__).resolve().parent]
+    if getattr(sys, "_MEIPASS", None):
+        folders.append(Path(sys._MEIPASS))
+    for folder in folders:
+        path = folder / name
+        if path.is_file():
+            return path
+    return None
+
+
+def app_executable() -> str:
+    """exe 版的 exe 檔路徑。"""
+    if getattr(sys, "frozen", False):                  # PyInstaller
+        return sys.executable
+    compiled = globals().get("__compiled__")           # Nuitka
+    original = getattr(compiled, "original_argv0", None)
+    return os.path.abspath(original or sys.argv[0])
 
 
 # ============================================================================
@@ -1004,16 +1096,26 @@ def find_csc():
     return None
 
 
+class CscMissingError(RuntimeError):
+    """電腦上找不到 C# 編譯器。"""
+
+
 def build_runner(log=print) -> Path:
-    """編譯假遊戲執行器；已經編譯過而且版本相同就直接用。"""
+    """準備假遊戲執行器：exe 版直接用內附的；否則用 csc 編譯。已經準備好而且版本相同就直接用。"""
     RUNNER_DIR.mkdir(parents=True, exist_ok=True)
     exe = RUNNER_DIR / "BadgeIdlerRunner.exe"
     stamp = RUNNER_DIR / "version.txt"
     if exe.is_file() and stamp.is_file() and stamp.read_text(encoding="utf-8").strip() == RUNNER_VERSION:
         return exe
+    bundled = bundled_file("BadgeIdlerRunner.exe") if IS_FROZEN else None
+    if bundled is not None:
+        shutil.copyfile(str(bundled), str(exe))
+        stamp.write_text(RUNNER_VERSION, encoding="utf-8")
+        log(t("runner_from_bundle"))
+        return exe
     csc = find_csc()
     if csc is None:
-        raise RuntimeError(t("csc_missing"))
+        raise CscMissingError(t("csc_missing"))
     log(t("compiling"))
     source = RUNNER_DIR / "BadgeIdlerRunner.cs"
     source.write_text(RUNNER_SOURCE, encoding="utf-8-sig")
@@ -1114,6 +1216,22 @@ class FakeGame:
                 self.proc.stdin.close()
             except OSError:
                 pass
+
+
+def self_test_launch(runner, seconds: float = 2.0, games_dir=None):
+    """試跑一個假遊戲幾秒鐘，確認沒有被防毒或系統擋下。成功回傳 None，失敗回傳原因。"""
+    game = Game("1000000000000000000", t("self_test_title"), "selftest/badge_idler_selftest.exe")
+    fake = FakeGame(game, runner, minimized=True, games_dir=games_dir)
+    try:
+        fake.start()
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return explain_launch_error(exc)
+    try:
+        time.sleep(seconds)
+        code = fake.exit_code()
+        return None if code is None else f"exit code {code}"
+    finally:
+        fake.stop()
 
 
 # ============================================================================
@@ -1484,11 +1602,35 @@ def is_discord_running():
     return False
 
 
+def find_discord():
+    """回傳 (Update.exe 路徑, Discord 執行檔名稱)；沒安裝回傳 None。"""
+    base = os.environ.get("LOCALAPPDATA")
+    if not base:
+        return None
+    for folder, exe_name in DISCORD_INSTALLS:
+        updater = Path(base) / folder / "Update.exe"
+        if updater.is_file():
+            return updater, exe_name
+    return None
+
+
+def launch_discord() -> bool:
+    """開啟 Discord 電腦版。沒安裝回傳 False；開啟失敗會丟出 OSError。"""
+    found = find_discord()
+    if found is None:
+        return False
+    updater, exe_name = found
+    subprocess.Popen([str(updater), "--processStart", exe_name], creationflags=CREATE_NO_WINDOW)
+    return True
+
+
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "DiscordBadgeIdler"
 
 
 def autostart_command() -> str:
+    if IS_FROZEN:
+        return f'"{app_executable()}" --autostart'
     exe = Path(sys.executable)
     windowless = exe.with_name("pythonw.exe")      # 用 pythonw 開機時才不會跳出黑色視窗
     if windowless.is_file():
@@ -1704,6 +1846,7 @@ class App:
         self.stream_game = None
         self._auto_started = False
         self._opened_seen = -1               # 用來發現「開過」名單有變動，更新清單上的記號
+        self._checking = False               # 「檢查並修復」進行中
         self._language_updaters = []         # 切換語言時要重新設定文字的元件
         self.idler = Idler(self.state, self.log)
 
@@ -1821,8 +1964,12 @@ class App:
 
         top = ttk.Frame(root, padding=(12, 10, 12, 0))
         top.pack(fill="x")
-        self.lbl_discord = ttk.Label(top)
-        self.lbl_discord.grid(row=0, column=0, sticky="w")
+        discord_box = ttk.Frame(top)
+        discord_box.grid(row=0, column=0, sticky="w")
+        self.lbl_discord = ttk.Label(discord_box)
+        self.lbl_discord.pack(side="left")
+        self.btn_discord = self.translate(ttk.Button(discord_box, command=self.open_discord), "open_discord")
+        self.btn_discord.pack(side="left", padx=(8, 0))
         self.lbl_runner = ttk.Label(top)
         self.lbl_runner.grid(row=0, column=1, sticky="w", padx=(24, 0))
         language_box = ttk.Frame(top)
@@ -1965,6 +2112,8 @@ class App:
         self._add_tab(notebook, tab, "tab_help")
         row = ttk.Frame(tab)
         row.pack(side="bottom", fill="x", pady=(8, 0))
+        self.btn_check = self.translate(ttk.Button(row, command=self.run_self_check), "check_fix")
+        self.btn_check.pack(side="left", padx=(0, 8))
         self.translate(ttk.Button(row, command=self.open_data_dir), "open_folder").pack(side="left")
         self.translate(ttk.Button(row, command=self.clear_bad), "clear_bad").pack(side="left", padx=(8, 0))
         self.translate(ttk.Button(row, command=self.delete_fake_files), "delete_files").pack(side="left", padx=(8, 0))
@@ -1992,6 +2141,7 @@ class App:
         else:
             text, color = t("discord_checking"), ""
         self.lbl_discord.configure(text=text, foreground=color)
+        self.btn_discord.configure(state="disabled" if self.discord_running is True else "normal")
 
         if self.runner is not None:
             text, color = t("runner_ready"), GREEN
@@ -2040,7 +2190,7 @@ class App:
             try:
                 post(("runner_ok", build_runner(log=lambda m: post(("log", m)))))
             except Exception as exc:
-                post(("runner_error", str(exc)))
+                post(("runner_error", (str(exc), isinstance(exc, CscMissingError))))
         try:
             post(("library_ok", load_library(force_download, log=lambda m: post(("log", m)))))
         except Exception as exc:
@@ -2076,10 +2226,13 @@ class App:
             self._render_top_labels()
             self._maybe_autostart()
         elif kind == "runner_error":
-            self.runner_error = payload
+            message, csc_missing = payload
+            self.runner_error = message
             self._render_top_labels()
-            self.log(t("runner_failed_log", error=payload))
-            messagebox.showerror(t("app_name"), t("runner_failed", error=payload))
+            self.log(t("runner_failed_log", error=message))
+            messagebox.showerror(t("app_name"), t("runner_failed", error=message))
+            if csc_missing and messagebox.askyesno(t("app_name"), t("ask_open_dotnet")):
+                webbrowser.open(DOTNET_DOWNLOAD_URL)
         elif kind == "library_ok":
             self.library = payload
             self.library_error = None
@@ -2104,6 +2257,8 @@ class App:
             self.discord_checked = True
             self.idler.discord_running = payload is not False
             self._render_top_labels()
+        elif kind == "selfcheck_done":
+            self._show_self_check(*payload)
 
     def _maybe_autostart(self) -> None:
         if self._auto_started or self.runner is None or self.library is None:
@@ -2111,6 +2266,8 @@ class App:
         self._auto_started = True
         if self.var_auto_start.get() and self.idler.mode is None:
             self.log(t("auto_starting"))
+            if self.discord_running is False and find_discord() is not None:
+                self.open_discord()
             self.start_hours(confirm=False)
 
     def reload_library(self) -> None:
@@ -2242,9 +2399,115 @@ class App:
         return True
 
     def _confirm_discord(self) -> bool:
-        if self.discord_running is False:
+        """Discord 沒開的話：有安裝就問要不要幫忙開，沒安裝就確認要不要照樣開始。"""
+        if self.discord_running is not False:
+            return True
+        if find_discord() is None:
             return messagebox.askyesno(t("app_name"), t("confirm_no_discord"))
+        answer = messagebox.askyesnocancel(t("app_name"), t("ask_launch_discord"))
+        if answer is None:
+            return False
+        if answer:
+            self.open_discord()
         return True
+
+    def open_discord(self) -> None:
+        try:
+            launched = launch_discord()
+        except OSError as exc:
+            messagebox.showerror(t("app_name"), t("discord_launch_failed", error=exc))
+            return
+        if launched:
+            self.log(t("discord_launching"))
+            threading.Thread(target=self._wait_for_discord, daemon=True).start()
+        elif messagebox.askyesno(t("app_name"), t("discord_not_installed")):
+            webbrowser.open(DISCORD_DOWNLOAD_URL)
+
+    def _wait_for_discord(self) -> None:
+        """剛開 Discord 時，每 5 秒檢查一次，最多 30 秒，讓狀態早點更新。"""
+        for _ in range(6):
+            time.sleep(5)
+            running = is_discord_running()
+            self.events.put(("discord", running))
+            if running:
+                return
+
+    # ---------- 檢查並修復 ----------
+    def run_self_check(self) -> None:
+        if self._checking:
+            return
+        self._checking = True
+        self.btn_check.configure(state="disabled")
+        self.log(t("checking"))
+        threading.Thread(target=self._self_check_worker, args=(self.library,), daemon=True).start()
+
+    def _self_check_worker(self, library) -> None:
+        post = self.events.put
+        results = []          # (記號, 說明)
+        actions = []          # 檢查完要問你的事
+        detail = t("chk_app_exe") if IS_FROZEN else t("chk_app_py", version=platform.python_version())
+        results.append(("✓", t("chk_app", detail=detail)))
+
+        try:                                                   # 1) 資料夾能不能寫
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            probe = DATA_DIR / "write_test.tmp"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            results.append(("✓", t("chk_folder_ok")))
+        except OSError as exc:
+            results.append(("✗", t("chk_folder_fail", error=exc)))
+
+        missing = not (RUNNER_DIR / "BadgeIdlerRunner.exe").is_file()
+        try:                                                   # 2) 假遊戲執行器：不見就重建，再試跑
+            runner = build_runner(log=lambda m: post(("log", m)))
+            post(("runner_ok", runner))
+            results.append(("✓", t("chk_runner_fixed") if missing else t("chk_runner_ok")))
+            error = self_test_launch(runner)
+            results.append(("✓", t("chk_launch_ok")) if error is None else ("✗", t("chk_launch_fail", error=error)))
+        except Exception as exc:
+            results.append(("✗", t("chk_runner_fail", error=exc)))
+            if isinstance(exc, CscMissingError):
+                actions.append("dotnet")
+
+        if library is None:                                    # 3) 遊戲清單：沒載入就重新下載
+            try:
+                library = load_library(True, log=lambda m: post(("log", m)))
+                post(("library_ok", library))
+                results.append(("✓", t("chk_list_fixed", count=len(library.games))))
+            except Exception as exc:
+                results.append(("✗", t("chk_list_fail", error=exc)))
+        else:
+            results.append(("✓", t("chk_list_ok", count=len(library.games))))
+
+        running = is_discord_running()                         # 4) Discord
+        post(("discord", running))
+        if running is True:
+            results.append(("✓", t("chk_discord_running")))
+        elif find_discord() is None:
+            results.append(("✗", t("chk_discord_missing")))
+            actions.append("discord_download")
+        elif running is False:
+            results.append(("!", t("chk_discord_closed")))
+            actions.append("discord_launch")
+        else:
+            results.append(("!", t("chk_discord_unknown")))
+        post(("selfcheck_done", (results, actions)))
+
+    def _show_self_check(self, results, actions) -> None:
+        self._checking = False
+        self.btn_check.configure(state="normal")
+        lines = [f"{mark} {text}" for mark, text in results]
+        for line in lines:
+            self.log(line)
+        if all(mark == "✓" for mark, _ in results):
+            lines += ["", t("check_all_ok")]
+        messagebox.showinfo(t("check_title"), "\n".join(lines))
+        if "dotnet" in actions and messagebox.askyesno(t("app_name"), t("ask_open_dotnet")):
+            webbrowser.open(DOTNET_DOWNLOAD_URL)
+        if "discord_launch" in actions and messagebox.askyesno(t("app_name"), t("ask_open_discord_now")):
+            self.open_discord()
+        if "discord_download" in actions and messagebox.askyesno(t("app_name"), t("discord_not_installed")):
+            webbrowser.open(DISCORD_DOWNLOAD_URL)
 
     def toggle_hours(self) -> None:
         if self.idler.mode == "hours":
@@ -2437,10 +2700,10 @@ def main(argv=None) -> int:
     saved.load()
     set_language(resolve_language(saved.settings["language"]))     # 開視窗前的訊息也用你選的語言
     if tk is None:
-        print(t("need_tkinter"))
+        show_native_error(t("app_name"), t("need_tkinter"))
         return 1
     if os.name != "nt":
-        print(t("windows_only"))
+        show_native_error(t("app_name"), t("windows_only"))
         return 1
     enable_dpi_awareness()
     if not acquire_single_instance():
@@ -2459,5 +2722,23 @@ def main(argv=None) -> int:
     return 0
 
 
+def run() -> int:
+    """程式入口：任何沒處理到的錯誤都會跳出錯誤視窗並存成 crash_log.txt，不會無聲無息地關掉。"""
+    try:
+        return main()
+    except KeyboardInterrupt:
+        return 130
+    except SystemExit:
+        raise
+    except BaseException:
+        details = traceback.format_exc()
+        if sys.stderr is not None:
+            sys.stderr.write(details)
+        path = write_crash_log(details)
+        last_line = details.strip().splitlines()[-1] if details.strip() else "?"
+        show_native_error(t("app_name"), t("fatal_error", error=last_line, path=path))
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())
