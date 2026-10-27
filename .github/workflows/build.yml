@@ -50,6 +50,34 @@ jobs:
           --output-filename=DiscordBadgeIdler.exe
           discord_badge_idler.py
 
+      - name: Smoke test (start the EXE and check it works)
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP "smoke"
+          $env:BADGE_IDLER_DATA = $data
+          $env:BADGE_IDLER_LANG = "en"
+          Start-Process -FilePath (Join-Path (Get-Location) "build\DiscordBadgeIdler.exe")
+          $log = Join-Path $data "log.txt"
+          $ok = $false
+          for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
+            Start-Sleep -Seconds 2
+            $ok = (Test-Path $log) -and (Select-String -Path $log -SimpleMatch "bundled with the app" -Quiet)
+          }
+          if (Test-Path $log) { Get-Content $log }
+          $crash = Join-Path $data "crash_log.txt"
+          if (Test-Path $crash) { Get-Content $crash; $ok = $false }
+          $app = @(Get-Process -Name DiscordBadgeIdler -ErrorAction SilentlyContinue)
+          if ($app.Count -eq 0) { Write-Host "The app is not running."; $ok = $false }
+          $runner = Join-Path $data "runner\BadgeIdlerRunner.exe"
+          if (Test-Path $runner) {
+            $game = Start-Process -FilePath $runner -ArgumentList "--title", "SmokeTest" -PassThru
+            Start-Sleep -Seconds 3
+            if ($game.HasExited) { Write-Host "The dummy game runner exited early."; $ok = $false } else { Stop-Process -Id $game.Id -Force }
+          } else { Write-Host "The dummy game runner was not set up."; $ok = $false }
+          $app | Stop-Process -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "Smoke test failed" }
+          Write-Host "Smoke test passed."
+
       - name: Upload the EXE as a build artifact
         uses: actions/upload-artifact@v4
         with:
