@@ -15,21 +15,22 @@
 ## 原理
 
 1. 下載 Discord 公開的「可偵測遊戲清單」，裡面有每款遊戲的執行檔名稱。
-2. 用 Windows 內建的 C# 編譯器（`csc.exe`）做出一個很小的視窗程式。
+2. 用一個很小的視窗程式當作假遊戲。exe 版已經內建；Python 版會用 Windows 內建的 C# 編譯器（`csc.exe`）做出來。
 3. 把這個程式複製成某款遊戲的執行檔名稱再執行，Discord 看到後就會顯示「正在玩 某某遊戲」。
 
 不需要你的 Discord token，也不會修改 Discord 程式。除了 Discord 官方程式偵測到遊戲時本來就會回報的資料，不會送出任何東西給 Discord。
 
-## 需求
+## 下載
 
-- Windows 10 或 11（要有 .NET Framework 4，預設就有）
-- Python 3.8 以上，並包含 tkinter（python.org 的安裝程式預設就有）
-- Discord 電腦版，開著並保持登入
+- **exe 版（推薦）**：到[最新版本](../../releases/tag/latest)下載 `DiscordBadgeIdler.exe`，直接執行就好，不需要 Python 或其他工具。每次更新時，GitHub Actions 都會用 Nuitka 把程式編譯成原生程式。
+- **Python 版**：把 `discord_badge_idler.py` 和 `start.bat` 放在同一個資料夾，雙擊 `start.bat`。如果找不到含 tkinter 的 Python 3.8 以上版本，它會問你要不要自動安裝。
+
+兩種版本都需要 Windows 10 或 11，以及開著並保持登入的 Discord 電腦版。
 
 ## 使用方式
 
-1. 把 `discord_badge_idler.py` 和 `start.bat` 放在同一個資料夾。
-2. 雙擊 `start.bat`，或在命令列輸入 `python discord_badge_idler.py`。
+1. 開啟 `DiscordBadgeIdler.exe`（或 `start.bat`）。
+2. 如果缺東西或有問題，到「說明」分頁按「檢查並修復」（見下方）。
 3. **遊戲時數**分頁：按「開始掛時數」。大約 30 秒後，確認 Discord 有顯示「正在玩…」（或看 Discord 設定 →「已登錄的遊戲」）。沒有的話按「Discord 沒偵測到？換一款」。
 4. **遊戲款數**分頁：填入 Discord 上目前的款數和目標，按「開始跑款數」。
 5. **直播**分頁：按「開啟直播視窗」，再到語音頻道分享這個視窗。要有人在看，時數才會累積。
@@ -40,6 +41,18 @@
 - 遊戲清單的**範圍**：全部遊戲／只看開過的／只看沒開過的。隨機挑選（包含「同時執行」多開的那幾款）都會照這個範圍；款數模式一律只挑沒開過的。
 - **開機時自動開啟這個程式**和**程式開啟後自動開始掛時數**：電腦重開機後會自動繼續掛。
 - 掛機時程式會阻止電腦自動睡眠，螢幕還是可以關。
+- **開啟 Discord**（在 Discord 狀態旁邊）：幫你開啟 Discord。Discord 沒開時按開始，程式也會問要不要幫你開。
+
+### 檢查並修復
+
+「說明」分頁的**檢查並修復**會檢查程式需要的所有東西，能修的會直接修好：
+
+- 資料夾能不能寫入；
+- 假遊戲執行器在不在（不見就重建），並試跑一次，看有沒有被防毒或 Smart App Control 擋下；
+- 遊戲清單有沒有載入（沒有就重新下載）；
+- Discord 有沒有安裝、有沒有開（會問要不要幫你開；沒安裝就開下載頁）。
+
+程式萬一當掉，會跳出錯誤視窗，並把詳細內容存到資料夾裡的 `crash_log.txt`。Python 版的 `start.bat` 也會把啟動時的錯誤存成 `last_error.txt`。
 
 程式的檔案（假遊戲執行檔、遊戲清單快取、設定和紀錄）放在 `%LOCALAPPDATA%\DiscordBadgeIdler`。
 

@@ -15,21 +15,22 @@ The interface follows your Windows display language (Traditional Chinese or Engl
 ## How it works
 
 1. Downloads Discord's public list of detectable games, which includes each game's executable name.
-2. Builds a tiny window program with the C# compiler that ships with Windows (`csc.exe`).
+2. Uses a tiny window program as the dummy game. The EXE has it built in; the Python version builds it with the C# compiler that ships with Windows (`csc.exe`).
 3. Copies that program under a game's executable name and runs it. The Discord app sees it and shows "Playing" with that game's name.
 
 It doesn't need your Discord token and doesn't modify the Discord app. Nothing is sent to Discord except what the official app already reports when it detects a game.
 
-## Requirements
+## Download
 
-- Windows 10 or 11 (with .NET Framework 4, which is installed by default)
-- Python 3.8 or newer with tkinter (the python.org installer includes it)
-- The Discord desktop app, open and signed in
+- **EXE (recommended):** download `DiscordBadgeIdler.exe` from the [latest release](../../releases/tag/latest) and run it. It doesn't need Python or any other tools. A GitHub Actions workflow compiles it to native code with Nuitka on every update.
+- **Python version:** put `discord_badge_idler.py` and `start.bat` in the same folder and double-click `start.bat`. If it can't find Python 3.8+ with tkinter, it offers to install it for you.
+
+Either way you need Windows 10 or 11 and the Discord desktop app, open and signed in.
 
 ## Usage
 
-1. Put `discord_badge_idler.py` and `start.bat` in the same folder.
-2. Double-click `start.bat`, or run `python discord_badge_idler.py`.
+1. Open `DiscordBadgeIdler.exe` (or `start.bat`).
+2. If something's missing or not working, click **Check & repair** on the Help tab (see below).
 3. **Game hours** tab: click *Start hours mode*. After about 30 seconds, check that Discord shows "Playing …" (or look at Discord Settings → Registered Games). If it doesn't, click *Not detected by Discord? Switch game*.
 4. **Games played** tab: enter how many games Discord shows now and your target, then click *Start games-played mode*.
 5. **Streaming** tab: click *Open stream window*, then share that window in a voice channel. The hours only count while someone watches.
@@ -40,6 +41,18 @@ It doesn't need your Discord token and doesn't modify the Discord app. Nothing i
 - **Show** menu in the game list: *All games*, *Opened before*, or *Never opened*. Random picks, including the extra games for *Run at once*, follow it. Games-played mode always uses games the app has never opened.
 - **Open this app when Windows starts** and **Start hours mode when the app opens:** idling resumes by itself after a restart.
 - While idling, the app keeps Windows from going to sleep on its own. The screen can still turn off.
+- **Open Discord** (next to the Discord status) starts the Discord app for you. When you start idling while Discord is closed, the app offers to open it.
+
+### Check & repair
+
+The **Check & repair** button on the Help tab checks everything the app depends on and fixes what it can:
+
+- the data folder can be written to;
+- the dummy game runner exists (it's rebuilt if missing) and a test launch works, which catches antivirus or Smart App Control blocks;
+- the game list is loaded (it's downloaded again if not);
+- Discord is installed and running (it offers to open Discord, or the download page if it isn't installed).
+
+If the app ever crashes, it shows the error in a pop-up and saves the details to `crash_log.txt` in the data folder. The Python version's `start.bat` also saves startup errors to `last_error.txt`.
 
 The app keeps its files (dummy executables, the cached game list, settings and a log) in `%LOCALAPPDATA%\DiscordBadgeIdler`.
 
