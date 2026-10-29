@@ -40,6 +40,7 @@ Either way you need Windows 10 or 11 and the Discord desktop app, open and signe
 - **Run at once (experimental):** runs up to 100 dummy games at the same time. If Discord counts each game separately, hours add up faster. This isn't confirmed, so compare your badge after a day.
 - **Show** menu in the game list: *All games*, *Opened before*, or *Never opened*. Random picks, including the extra games for *Run at once*, follow it. Games-played mode always uses games the app has never opened.
 - **Open this app when Windows starts** and **Start hours mode when the app opens:** idling resumes by itself after a restart.
+- **Stop automatically after N hours of idling** (Game hours tab): hours mode stops by itself once it has idled that long, and Windows can go to sleep again. Time while Discord is closed doesn't count. You can turn it on or change it while hours mode is running.
 - While idling, the app keeps Windows from going to sleep on its own. The screen can still turn off.
 - **Open Discord** (next to the Discord status) starts the Discord app for you. When you start idling while Discord is closed, the app offers to open it.
 

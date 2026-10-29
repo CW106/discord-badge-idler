@@ -57,7 +57,7 @@ except ImportError:  # 少數 Python 安裝沒有 tkinter
 # 基本設定
 # ============================================================================
 
-VERSION = "1.3"
+VERSION = "1.4"
 
 # 用 Nuitka 或 PyInstaller 打包成 exe 時為 True
 IS_FROZEN = bool(getattr(sys, "frozen", False)) or "__compiled__" in globals()
@@ -70,6 +70,7 @@ DETECTABLE_SOURCES = [
 LIST_MAX_AGE = 24 * 3600          # 遊戲清單超過一天就重新下載
 USER_CLOSED_EXIT_CODE = 2         # 假遊戲視窗被使用者手動關掉時的結束代碼（C# 那邊定義的）
 MAX_PARALLEL = 100                # 「同時執行」最多幾款
+AUTO_STOP_LIMITS = (0.1, 10000.0)  # 「掛滿幾小時後自動停止」可以設定的範圍（小時）
 PICK_MODES = ("all", "opened", "unopened")   # 遊戲清單範圍：全部／開過的／沒開過的
 OPENED_MARK = "✓ "                # 清單裡「開過」的遊戲前面加這個記號
 DISCORD_PROCESS_NAMES = {"discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"}
@@ -100,6 +101,8 @@ DEFAULT_SETTINGS = {
     "then_hours": True,
     "minimized": False,
     "auto_start": False,
+    "auto_stop": False,           # 掛時數掛滿幾小時後自動停止
+    "auto_stop_hours": 8.0,
     "stream_current": 0,
     "hours_pick": "all",          # 時數分頁的遊戲清單範圍
     "stream_pick": "all",         # 直播分頁的遊戲清單範圍
@@ -213,6 +216,10 @@ STRINGS = {
     "game_done": ("完成第 {count} 款：{name}", "Finished game #{count}: {name}"),
     "hours_stopped_empty": ("沒有假遊戲在執行了，時數模式已停止。",
                             "No dummy games are running anymore, so hours mode stopped."),
+    "auto_stop_set": ("掛滿 {time}後會自動停止。",
+                      "Hours mode will stop automatically after {time} of idling."),
+    "auto_stop_off": ("已取消自動停止。", "Auto-stop is off."),
+    "auto_stopped": ("已經掛滿 {time}，自動停止了。", "Idled for {time}, so hours mode stopped automatically."),
 
     # ---- 遊戲選擇 ----
     "search_label": ("搜尋遊戲：", "Search games:"),
@@ -250,6 +257,7 @@ STRINGS = {
                      "Status: hours mode ({count} running) | this session {time}"),
     "status_variety": ("目前狀態：跑款數中（完成 {done}／{total}）｜本次 {time}",
                        "Status: games-played mode ({done}/{total} done) | this session {time}"),
+    "status_auto_stop": ("｜{time}後自動停止", " | stops in {time}"),
     "status_paused": ("｜Discord 沒開，暫停計時", " | Discord isn't running, timer paused"),
     "status_streaming": ("｜直播視窗開啟中", " | stream window open"),
     "total_idle": ("這個程式累計掛機：{hours:.1f} 小時（只算 Discord 有開的時間）",
@@ -272,6 +280,9 @@ STRINGS = {
     "hours_current_label": ("Discord 上目前的遊戲時數：", "Current game hours on Discord:"),
     "boot_start": ("開機時自動開啟這個程式", "Open this app when Windows starts"),
     "auto_start": ("程式開啟後自動開始掛時數", "Start hours mode when the app opens"),
+    "auto_stop_label": ("掛滿", "Stop automatically after"),
+    "auto_stop_unit": ("小時後自動停止（Discord 沒開的時間不算）",
+                       "hours of idling (time with Discord closed doesn't count)"),
     "start_hours": ("開始掛時數", "Start hours mode"),
     "stop_hours": ("停止掛時數", "Stop hours mode"),
     "swap_game": ("Discord 沒偵測到？換一款", "Not detected by Discord? Switch game"),
@@ -350,6 +361,7 @@ STRINGS = {
 
 【小提醒】
 ・掛機時程式會阻止電腦「自動」睡眠（螢幕還是會關）。手動睡眠、闔上筆電或關機就會中斷。
+・時數分頁可以勾「掛滿 N 小時後自動停止」，時間到就會自己停（Discord 沒開的時間不算）。
 ・徽章進度不一定即時更新，可能要過一段時間（甚至一天）才會變。
 ・如果徽章一直沒增加，可以到 Discord 設定的「活動隱私」，確認有開啟分享偵測到的活動。
 ・Discord 隨時可能改變偵測方式，不保證一定會被計入。
@@ -385,6 +397,8 @@ THE THREE BADGES
 GOOD TO KNOW
 • While idling, the app stops Windows from going to sleep on its own (the screen can still turn off).
   Manual sleep, closing a laptop lid, or shutting down will interrupt it.
+• On the Game hours tab, "Stop automatically after N hours of idling" stops hours mode by itself
+  when the time is up (time with Discord closed doesn't count).
 • Badge progress may not update right away; it can take a while (even a day).
 • If a badge never goes up, check Discord Settings → Activity Privacy and make sure
   sharing your detected activity is turned on.
@@ -1273,6 +1287,9 @@ class State:
         for key in ("hours_pick", "stream_pick"):
             if self.settings[key] not in PICK_MODES:
                 self.settings[key] = "all"
+        low, high = AUTO_STOP_LIMITS
+        if not low <= self.settings["auto_stop_hours"] <= high:      # 超出範圍（或 NaN）就用預設
+            self.settings["auto_stop_hours"] = DEFAULT_SETTINGS["auto_stop_hours"]
 
     def save(self) -> None:
         data = {
@@ -1308,6 +1325,8 @@ class Idler:
         self.parallel = 1
         self.minimized = False
         self.pick_mode = "all"            # 隨機挑遊戲的範圍：all / opened / unopened
+        self.stop_after = None            # 時數模式掛滿幾秒後自動停止（None = 不會自動停止）
+        self.auto_stopped = None          # 上次因為掛滿而自動停止時的設定秒數（給介面顯示）
         self.session_seconds = 0.0
         # 款數模式
         self.queue = []
@@ -1378,10 +1397,12 @@ class Idler:
 
     # ---------- 時數模式 ----------
     def start_hours(self, main_game=None, parallel: int = 1, minimized: bool = False,
-                    pick_mode: str = "all") -> bool:
+                    pick_mode: str = "all", stop_after=None) -> bool:
+        """stop_after：掛滿幾秒後自動停止（None = 一直掛到手動停止）。"""
         if not self.ready:
             return False
         self.stop(quiet=True)
+        self.auto_stopped = None
         self.parallel = max(1, min(MAX_PARALLEL, int(parallel)))
         self.minimized = bool(minimized)
         self.pick_mode = pick_mode if pick_mode in PICK_MODES else "all"
@@ -1403,7 +1424,17 @@ class Idler:
             return False
         self._begin()
         self.log(t("hours_started", count=len(self.slots)))
+        self.set_stop_after(stop_after)
         return True
+
+    def set_stop_after(self, seconds) -> None:
+        """設定時數模式掛滿幾秒後自動停止（None 或 0 = 不自動停止）。掛時數途中改也會馬上生效。"""
+        seconds = float(seconds) if seconds else None
+        if seconds == self.stop_after:
+            return
+        self.stop_after = seconds
+        if self.mode == "hours":
+            self.log(t("auto_stop_set", time=fmt_hours_minutes(seconds)) if seconds else t("auto_stop_off"))
 
     def replace_main(self):
         """時數模式：目前的主要遊戲偵測不到 → 標記起來、換一款。"""
@@ -1430,6 +1461,7 @@ class Idler:
         if not self.ready:
             return False
         self.stop(quiet=True)
+        self.auto_stopped = None
         picks = self.pick_games(count, "unopened", self.state.played_ids)
         if not picks:
             self.log(t("no_unplayed"))
@@ -1470,7 +1502,7 @@ class Idler:
         if then is not None:
             self.log(t("switch_to_hours"))
             self.start_hours(then.get("game"), then.get("parallel", 1), then.get("minimized", False),
-                             then.get("pick_mode", "all"))
+                             then.get("pick_mode", "all"), then.get("stop_after"))
 
     def variety_eta_seconds(self) -> float:
         if self.mode != "variety":
@@ -1490,6 +1522,7 @@ class Idler:
         self.queue = []
         self.mode = None
         self.then_hours = None
+        self.stop_after = None
         self._set_awake(False)
         self.state.save()
         if was_running and not quiet:
@@ -1534,7 +1567,15 @@ class Idler:
             self.session_seconds += dt
             self.state.total_seconds += dt
 
-        # 3) 款數模式：玩夠久的換下一款
+        # 3) 時數模式：掛滿設定的時間就自動停止
+        if self.mode == "hours" and self.stop_after is not None and self.session_seconds >= self.stop_after:
+            limit = self.stop_after
+            self.stop(quiet=True)
+            self.auto_stopped = limit
+            self.log(t("auto_stopped", time=fmt_hours_minutes(limit)))
+            return
+
+        # 4) 款數模式：玩夠久的換下一款
         if self.mode == "variety":
             for fake in list(self.slots):
                 if fake.play_seconds >= self.variety_seconds:
@@ -1552,7 +1593,7 @@ class Idler:
             self.stop(quiet=True)
             return
 
-        # 4) 每分鐘存檔一次
+        # 5) 每分鐘存檔一次
         if now - self._last_save >= 60:
             self.state.save()
             self._last_save = now
@@ -1882,6 +1923,8 @@ class App:
         self.var_then_hours = tk.BooleanVar(value=s["then_hours"])
         self.var_minimized = tk.BooleanVar(value=s["minimized"])
         self.var_auto_start = tk.BooleanVar(value=s["auto_start"])
+        self.var_auto_stop = tk.BooleanVar(value=s["auto_stop"])
+        self.var_auto_stop_hours = tk.DoubleVar(value=s["auto_stop_hours"])
         self.var_boot = tk.BooleanVar(value=get_autostart())
         self.var_stream_current = tk.IntVar(value=s["stream_current"])
 
@@ -1899,6 +1942,24 @@ class App:
         except (tk.TclError, ValueError, TypeError):
             return default
         return max(low, min(high, value))
+
+    @staticmethod
+    def _float(var, default: float, low: float, high: float) -> float:
+        """跟 _int 一樣，但可以有小數（例如 1.5 小時）。"""
+        try:
+            value = float(var.get())
+        except (tk.TclError, ValueError, TypeError):
+            return default
+        if not math.isfinite(value):
+            return default
+        return max(low, min(high, value))
+
+    def _auto_stop_seconds(self):
+        """有勾「掛滿幾小時後自動停止」就回傳秒數，沒勾回傳 None。"""
+        if not self.var_auto_stop.get():
+            return None
+        hours = self._float(self.var_auto_stop_hours, self.state.settings["auto_stop_hours"], *AUTO_STOP_LIMITS)
+        return hours * 3600
 
     # ---------- 語言 ----------
     def translate(self, widget, key: str):
@@ -1954,9 +2015,9 @@ class App:
         try:      # 螢幕縮放 125%、150% 時，視窗跟著放大，並且不要超出螢幕
             factor = max(1.0, float(root.tk.call("tk", "scaling")) / (96 / 72))
             width = min(int(860 * factor), root.winfo_screenwidth() - 40)
-            height = min(int(740 * factor), root.winfo_screenheight() - 80)
+            height = min(int(760 * factor), root.winfo_screenheight() - 80)
         except (tk.TclError, ValueError, TypeError):
-            factor, width, height = 1.0, 860, 740
+            factor, width, height = 1.0, 860, 760
         self.wrap = int(780 * factor)            # 說明文字的換行寬度
         root.geometry(f"{width}x{height}")
         root.minsize(min(760, width), min(620, height))
@@ -2014,7 +2075,7 @@ class App:
         self._add_tab(notebook, tab, "tab_hours")
         self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap), "hours_intro").pack(anchor="w")
 
-        self.picker_hours = GamePicker(tab, self, height=7, mode_key="hours_pick")
+        self.picker_hours = GamePicker(tab, self, height=6, mode_key="hours_pick")
         self.picker_hours.pack(fill="both", expand=True, pady=(8, 6))
 
         row = ttk.Frame(tab)
@@ -2030,6 +2091,17 @@ class App:
         ttk.Spinbox(row, from_=0, to=1000000, width=8, textvariable=self.var_hours_current).pack(side="left")
         self.lbl_hours_calc = ttk.Label(row, text="")
         self.lbl_hours_calc.pack(side="left", padx=(8, 0))
+
+        row = ttk.Frame(tab)
+        row.pack(fill="x", pady=(6, 0))
+        self.translate(ttk.Checkbutton(row, variable=self.var_auto_stop, command=self._apply_auto_stop),
+                       "auto_stop_label").pack(side="left")
+        spin = ttk.Spinbox(row, from_=0.5, to=AUTO_STOP_LIMITS[1], increment=0.5, width=7,
+                           textvariable=self.var_auto_stop_hours, command=self._apply_auto_stop)
+        spin.pack(side="left", padx=(4, 0))
+        spin.bind("<Return>", self._apply_auto_stop)      # 打完數字按 Enter 或點別的地方就套用
+        spin.bind("<FocusOut>", self._apply_auto_stop)
+        self.translate(ttk.Label(row), "auto_stop_unit").pack(side="left", padx=(4, 0))
 
         row = ttk.Frame(tab)
         row.pack(fill="x", pady=(6, 0))
@@ -2333,6 +2405,8 @@ class App:
         session = fmt_duration(idler.session_seconds)
         if idler.mode == "hours":
             text = t("status_hours", count=len(idler.slots), time=session)
+            if idler.stop_after is not None:
+                text += t("status_auto_stop", time=fmt_hours_minutes(idler.stop_after - idler.session_seconds))
         elif idler.mode == "variety":
             text = t("status_variety", done=idler.variety_done, total=idler.variety_total, time=session)
         else:
@@ -2351,7 +2425,8 @@ class App:
             self.btn_hours.configure(text=t("stop_hours"))
             self.btn_swap.configure(state="normal")
         else:
-            self.lbl_hours_info.configure(text="")
+            stopped = t("auto_stopped", time=fmt_hours_minutes(idler.auto_stopped)) if idler.auto_stopped else ""
+            self.lbl_hours_info.configure(text=stopped)
             self.btn_hours.configure(text=t("start_hours"))
             self.btn_swap.configure(state="disabled")
 
@@ -2526,8 +2601,20 @@ class App:
                 return
         game = self.picker_hours.selected()
         parallel = self._int(self.var_hours_parallel, 1, 1, MAX_PARALLEL)
-        if self.idler.start_hours(game, parallel, self.var_minimized.get(), self.picker_hours.mode()):
+        if self.idler.start_hours(game, parallel, self.var_minimized.get(), self.picker_hours.mode(),
+                                  self._auto_stop_seconds()):
             self._save_settings()
+        self._refresh_status()
+
+    def _apply_auto_stop(self, event=None) -> None:
+        """勾選或改了自動停止的時數：記起來；正在掛的話馬上套用。"""
+        self._save_settings()
+        self.var_auto_stop_hours.set(self.state.settings["auto_stop_hours"])     # 打錯字就改回有效的數字
+        seconds = self._auto_stop_seconds()
+        if self.idler.mode == "hours":
+            self.idler.set_stop_after(seconds)
+        elif self.idler.mode == "variety" and self.idler.then_hours is not None:
+            self.idler.then_hours["stop_after"] = seconds          # 款數跑完接著掛時數時用
         self._refresh_status()
 
     def swap_hours_game(self) -> None:
@@ -2568,7 +2655,8 @@ class App:
             then = {"game": self.picker_hours.selected(),
                     "parallel": self._int(self.var_hours_parallel, 1, 1, MAX_PARALLEL),
                     "minimized": self.var_minimized.get(),
-                    "pick_mode": self.picker_hours.mode()}
+                    "pick_mode": self.picker_hours.mode(),
+                    "stop_after": self._auto_stop_seconds()}
         if self.idler.start_variety(need + buffer, minutes, parallel, self.var_minimized.get(), then):
             self._save_settings()
         self._refresh_status()
@@ -2670,6 +2758,8 @@ class App:
         s["then_hours"] = bool(self.var_then_hours.get())
         s["minimized"] = bool(self.var_minimized.get())
         s["auto_start"] = bool(self.var_auto_start.get())
+        s["auto_stop"] = bool(self.var_auto_stop.get())
+        s["auto_stop_hours"] = self._float(self.var_auto_stop_hours, s["auto_stop_hours"], *AUTO_STOP_LIMITS)
         if self.idler.mode == "hours" and self.idler.slots:
             s["hours_game_id"] = self.idler.slots[0].game.id
         else:
