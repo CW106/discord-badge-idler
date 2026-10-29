@@ -22,10 +22,12 @@ It doesn't need your Discord token and doesn't modify the Discord app. Nothing i
 
 ## Download
 
-- **EXE (recommended):** download `DiscordBadgeIdler.exe` from the [latest release](../../releases/tag/latest) and run it. It doesn't need Python or any other tools. A GitHub Actions workflow compiles it to native code with Nuitka on every update.
+- **EXE (recommended):** download `DiscordBadgeIdler.exe` from the [latest release](../../releases/latest) and run it. It doesn't need Python or any other tools. A GitHub Actions workflow compiles it to native code with Nuitka on every update.
 - **Python version:** put `discord_badge_idler.py` and `start.bat` in the same folder and double-click `start.bat`. If it can't find Python 3.8+ with tkinter, it offers to install it for you.
 
 Either way you need Windows 10 or 11 and the Discord desktop app, open and signed in.
+
+Older versions (v1.2 and later) are on the [Releases](../../releases) page, and [CHANGELOG.md](CHANGELOG.md) lists what changed in each one.
 
 ## Usage
 

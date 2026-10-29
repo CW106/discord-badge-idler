@@ -22,10 +22,12 @@
 
 ## 下載
 
-- **exe 版（推薦）**：到[最新版本](../../releases/tag/latest)下載 `DiscordBadgeIdler.exe`，直接執行就好，不需要 Python 或其他工具。每次更新時，GitHub Actions 都會用 Nuitka 把程式編譯成原生程式。
+- **exe 版（推薦）**：到[最新版本](../../releases/latest)下載 `DiscordBadgeIdler.exe`，直接執行就好，不需要 Python 或其他工具。每次更新時，GitHub Actions 都會用 Nuitka 把程式編譯成原生程式。
 - **Python 版**：把 `discord_badge_idler.py` 和 `start.bat` 放在同一個資料夾，雙擊 `start.bat`。如果找不到含 tkinter 的 Python 3.8 以上版本，它會問你要不要自動安裝。
 
 兩種版本都需要 Windows 10 或 11，以及開著並保持登入的 Discord 電腦版。
+
+舊版本（v1.2 起）都可以在 [Releases](../../releases) 頁面下載，每個版本改了什麼請看[更新紀錄](CHANGELOG.md)。
 
 ## 使用方式
 
