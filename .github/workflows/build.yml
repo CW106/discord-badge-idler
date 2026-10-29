@@ -44,11 +44,14 @@ jobs:
           while ($parts.Count -lt 4) { $parts += "0" }
           $fileVersion = $parts[0..3] -join "."
           Write-Host "Building version $version ($fileVersion)"
+          python -c "import pathlib, discord_badge_idler as m; pathlib.Path('app.ico').write_bytes(m.make_icon_ico())"
+          if ($LASTEXITCODE -ne 0) { throw "Couldn't make the icon" }
           $nuitkaArgs = @(
             "--onefile",
             "--assume-yes-for-downloads",
             "--enable-plugin=tk-inter",
             "--windows-console-mode=disable",
+            "--windows-icon-from-ico=app.ico",
             "--include-data-files=BadgeIdlerRunner.exe=BadgeIdlerRunner.exe",
             "--company-name=DiscordBadgeIdler",
             "--product-name=DiscordBadgeIdler",
