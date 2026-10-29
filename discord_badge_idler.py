@@ -25,6 +25,7 @@ EN: Keeps Discord's activity badges growing by running dummy "games" that Discor
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import filecmp
 import hashlib
@@ -36,6 +37,7 @@ import queue
 import random
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -43,6 +45,7 @@ import time
 import traceback
 import urllib.request
 import webbrowser
+import zlib
 from pathlib import Path
 
 try:
@@ -57,7 +60,7 @@ except ImportError:  # 少數 Python 安裝沒有 tkinter
 # 基本設定
 # ============================================================================
 
-VERSION = "1.5"
+VERSION = "1.6"
 
 # 用 Nuitka 或 PyInstaller 打包成 exe 時為 True
 IS_FROZEN = bool(getattr(sys, "frozen", False)) or "__compiled__" in globals()
@@ -113,7 +116,30 @@ DEFAULT_SETTINGS = {
     "stream_pick": "all",         # 直播分頁的遊戲清單範圍
 }
 
-GREEN, RED, GRAY = "#1a7f37", "#cf222e", "#6e7781"
+# 介面配色（Discord 深色風格）
+COLORS = {
+    "root": "#1E1F22",          # 最底層：標題、分頁標籤列、紀錄區
+    "card": "#2B2D31",          # 狀態卡片、紀錄框
+    "panel": "#313338",         # 分頁內容
+    "field": "#1E1F22",         # 輸入框、遊戲清單
+    "hover": "#3B3D44",
+    "line": "#3F4147",          # 邊框、分隔線
+    "text": "#DBDEE1",
+    "bright": "#F2F3F5",
+    "muted": "#949BA4",
+    "accent": "#5865F2",        # Discord 藍紫色
+    "accent_hover": "#4752C4",
+    "accent_press": "#3C45A5",
+    "button": "#4E5058",
+    "button_hover": "#6D6F78",
+    "button_press": "#5C5E66",
+    "danger": "#DA373C",
+    "danger_hover": "#A12828",
+    "danger_press": "#8F2424",
+    "disabled": "#3A3C42",
+    "disabled_text": "#80848E",
+}
+GREEN, RED, GRAY = "#23A55A", "#F23F42", "#949BA4"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # 執行命令時不要跳出黑色視窗
 
 
@@ -1851,6 +1877,150 @@ def acquire_single_instance() -> bool:
     return True
 
 
+def _png_bytes(width: int, height: int, raw: bytes) -> bytes:
+    """把 RGBA 像素（每列前面加一個 0）包成 PNG 檔。"""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes(raw), 9)) \
+        + chunk(b"IEND", b"")
+
+
+def _hex_rgb(color: str):
+    return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def _inside_crossings(crossings, x: float) -> bool:
+    """crossings 是一條水平線跟多邊形的交點（排好序），回傳 x 在不在多邊形裡面。"""
+    inside = False
+    for crossing in crossings:
+        if x < crossing:
+            break
+        inside = not inside
+    return inside
+
+
+def _in_rounded_rect(x: float, y: float, left: float, top: float, right: float, bottom: float, radius: float) -> bool:
+    if x < left or x > right or y < top or y > bottom:
+        return False
+    nx = min(max(x, left + radius), right - radius)
+    ny = min(max(y, top + radius), bottom - radius)
+    return (x - nx) ** 2 + (y - ny) ** 2 <= radius * radius
+
+
+def _distance_to_segment(px: float, py: float, a, b) -> float:
+    (ax, ay), (bx, by) = a, b
+    dx, dy = bx - ax, by - ay
+    k = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(px - ax - k * dx, py - ay - k * dy)
+
+
+def _render_png(width: int, height: int, paint, steps: int = 4) -> bytes:
+    """用 paint(x, y) → (r, g, b, 不透明度) 畫一張 PNG；每個像素取 steps×steps 點平均，邊緣才平滑。"""
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)                           # PNG 每一列開頭的 filter 類型
+        for x in range(width):
+            r = g = b = a = 0.0
+            for sy in range(steps):
+                for sx in range(steps):
+                    pr, pg, pb, pa = paint(x + (sx + 0.5) / steps, y + (sy + 0.5) / steps)
+                    r, g, b, a = r + pr * pa, g + pg * pa, b + pb * pa, a + pa
+            raw += bytes((round(r / a), round(g / a), round(b / a), round(255 * a / steps ** 2))) if a else bytes(4)
+    return _png_bytes(width, height, raw)
+
+
+def make_checkbox_png(size: int, checked: bool, hover: bool = False, gap: int = 0) -> bytes:
+    """勾選框圖片：沒勾是深色圓角框，勾了是藍紫色底加白色勾勾。右邊多留 gap 像素透明的空間，跟文字隔開。"""
+    box = _hex_rgb(COLORS["accent_hover" if hover else "accent"] if checked else COLORS["field"])
+    edge = box if checked else _hex_rgb("#B5BAC1" if hover else "#6D6F78")
+    radius, border, margin = size * 0.24, max(1.0, size / 11), 0.5
+    tick = [(0.27 * size, 0.52 * size), (0.43 * size, 0.68 * size), (0.74 * size, 0.35 * size)]
+    stroke = size * 0.13
+
+    def paint(x, y):
+        if not _in_rounded_rect(x, y, margin, margin, size - margin, size - margin, radius):
+            return 0, 0, 0, 0.0
+        if checked:
+            near = min(_distance_to_segment(x, y, tick[0], tick[1]), _distance_to_segment(x, y, tick[1], tick[2]))
+            return (255, 255, 255, 1.0) if near <= stroke / 2 else box + (1.0,)
+        inner = _in_rounded_rect(x, y, margin + border, margin + border, size - margin - border,
+                                 size - margin - border, max(radius - border, 0.0))
+        return (box if inner else edge) + (1.0,)
+    return _render_png(size + gap, size, paint)
+
+
+def make_icon_png(size: int = 64) -> bytes:
+    """畫程式圖示（Discord 藍紫色圓角方塊＋白色星星），用純 Python 輸出 PNG，不需要另外的圖檔。"""
+    accent = _hex_rgb(COLORS["accent"])
+    radius = size * 0.23
+    cx, cy = size / 2, size * 0.53
+    outer, inner = size * 0.34, size * 0.145
+    star = []
+    for i in range(10):
+        r = outer if i % 2 == 0 else inner
+        angle = math.pi / 2 + i * math.pi / 5
+        star.append((cx + r * math.cos(angle), cy - r * math.sin(angle)))
+    edges = list(zip(star, star[1:] + star[:1]))
+    steps = 4                                   # 每個像素取 4×4 個點，邊緣才會平滑
+    raw = bytearray()
+    for y in range(size):
+        cover, white = [0] * size, [0] * size
+        for sy in range(steps):
+            py = y + (sy + 0.5) / steps
+            dy = max(radius - py, py - (size - radius), 0.0)       # 圓角方塊在這條線上的左右範圍
+            if dy >= radius:
+                continue
+            left = radius - math.sqrt(radius * radius - dy * dy)
+            right = size - left
+            crossings = sorted(x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+                               for (x1, y1), (x2, y2) in edges if (y1 <= py) != (y2 <= py))
+            for x in range(size):
+                for sx in range(steps):
+                    px = x + (sx + 0.5) / steps
+                    if left <= px <= right:
+                        cover[x] += 1
+                        if _inside_crossings(crossings, px):
+                            white[x] += 1
+        raw.append(0)
+        for x in range(size):
+            mix = white[x] / cover[x] if cover[x] else 0.0
+            raw += bytes([round(c + (255 - c) * mix) for c in accent] + [round(255 * cover[x] / steps ** 2)])
+    return _png_bytes(size, size, raw)
+
+
+def make_icon_ico(sizes=(256, 64, 48, 32, 16)) -> bytes:
+    """Windows 的 .ico 圖示檔（打包 exe 時用），每種尺寸都存成 PNG。"""
+    images = [make_icon_png(size) for size in sizes]
+    offset = 6 + 16 * len(images)
+    entries = b""
+    for size, data in zip(sizes, images):
+        entries += struct.pack("<BBBBHHII", size % 256, size % 256, 0, 0, 1, 32, len(data), offset)
+        offset += len(data)
+    return struct.pack("<HHH", 0, 1, len(images)) + entries + b"".join(images)
+
+
+def use_dark_title_bar(window) -> None:
+    """Windows 10／11：把視窗的標題列改成深色（不支援的 Windows 就維持原樣）。"""
+    if os.name != "nt":
+        return
+    try:
+        user32, dwmapi = ctypes.WinDLL("user32"), ctypes.WinDLL("dwmapi")
+        dwmapi.DwmSetWindowAttribute.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+        user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p] + [ctypes.c_int] * 4 + [ctypes.c_uint]
+        window.update_idletasks()
+        hwnd = int(window.wm_frame(), 16)
+        on = ctypes.c_int(1)
+        for attribute in (20, 19):               # DWMWA_USE_IMMERSIVE_DARK_MODE（舊版 Windows 10 是 19）
+            if dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(on), ctypes.sizeof(on)) == 0:
+                break
+        color = ctypes.c_int(0x00221F1E)         # Windows 11 標題列顏色 #1E1F22（COLORREF 是 0x00BBGGRR）
+        dwmapi.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(color), ctypes.sizeof(color))
+        user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0020)   # 讓標題列馬上重畫
+    except Exception:
+        pass
+
+
 def enable_dpi_awareness() -> None:
     """高解析度螢幕上字才不會糊。"""
     if os.name != "nt":
@@ -1886,24 +2056,24 @@ class GamePicker(_TkFrame):
         row = ttk.Frame(self)
         row.pack(fill="x")
         app.translate(ttk.Label(row), "search_label").pack(side="left")
-        ttk.Entry(row, textvariable=self.search_var).pack(side="left", fill="x", expand=True, padx=4)
-        app.translate(ttk.Label(row), "filter_label").pack(side="left", padx=(4, 2))
+        ttk.Entry(row, textvariable=self.search_var).pack(side="left", fill="x", expand=True, padx=(6, 12))
+        app.translate(ttk.Label(row), "filter_label").pack(side="left", padx=(0, 6))
         self.cmb_filter = ttk.Combobox(row, state="readonly", width=12)
-        self.cmb_filter.pack(side="left", padx=(0, 4))
+        self.cmb_filter.pack(side="left", padx=(0, 8))
         self.cmb_filter.bind("<<ComboboxSelected>>", self._on_filter_changed)
-        app.translate(ttk.Button(row, command=self.pick_random), "random_pick").pack(side="left")
+        app.translate(ttk.Button(row, command=self.pick_random, style="Small.TButton"), "random_pick").pack(side="left")
 
-        box = ttk.Frame(self)
-        box.pack(fill="both", expand=True, pady=(4, 0))
-        self.listbox = tk.Listbox(box, height=height, exportselection=False, activestyle="none")
+        self.hint = ttk.Label(self, text=t("list_loading"), style="Muted.TLabel")
+        self.hint.pack(side="bottom", anchor="w", pady=(6, 0))
+        box = ttk.Frame(self, style="Field.TFrame")
+        box.pack(fill="both", expand=True, pady=(8, 0))
+        self.listbox = tk.Listbox(box, height=height, exportselection=False, activestyle="none",
+                                  font=app.font_normal, **app._text_colors(COLORS["field"]))
         bar = ttk.Scrollbar(box, orient="vertical", command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=bar.set)
-        self.listbox.pack(side="left", fill="both", expand=True)
+        self.listbox.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=6)
         bar.pack(side="right", fill="y")
         self.listbox.bind("<<ListboxSelect>>", lambda event: self.update_hint())
-
-        self.hint = ttk.Label(self, text=t("list_loading"), foreground=GRAY)
-        self.hint.pack(anchor="w")
 
         saved = app.state.settings.get(mode_key, "all") if mode_key else "all"
         if saved == "new" and not app.state.new_games:     # 新遊戲都過期了 → 改回全部遊戲（開機自動掛才挑得到遊戲）
@@ -2068,6 +2238,7 @@ class App:
         self.root.after(200, self._poll_events)
         self.root.after(1000, self._tick)
         self.root.after(LIST_CHECK_MS, self._auto_refresh_library)
+        self.root.after(50, lambda: use_dark_title_bar(self.root))
 
     # ---------- 變數 ----------
     def _init_vars(self) -> None:
@@ -2169,124 +2340,290 @@ class App:
         self.font_normal = tkfont.nametofont("TkDefaultFont")
         self.font_bold = self.font_normal.copy()
         self.font_bold.configure(weight="bold")
+        self.font_small = self.font_normal.copy()
+        self.font_small.configure(size=9)
+        self.font_small_bold = self.font_normal.copy()
+        self.font_small_bold.configure(size=9, weight="bold")
+        self.font_status = self.font_normal.copy()
+        self.font_status.configure(size=11, weight="bold")
+        self.font_title = self.font_normal.copy()
+        self.font_title.configure(size=15, weight="bold")
+
+    def _setup_theme(self) -> None:
+        """Discord 風格的深色主題：用 tkinter 內建的 clam 主題重新上色，不需要另外安裝任何東西。"""
+        c = COLORS
+        root = self.root
+        root.configure(background=c["root"])
+        style = ttk.Style(root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(".", background=c["panel"], foreground=c["text"], fieldbackground=c["field"],
+                        bordercolor=c["line"], lightcolor=c["panel"], darkcolor=c["panel"],
+                        troughcolor=c["field"], focuscolor=c["accent"], selectbackground=c["accent"],
+                        selectforeground="#FFFFFF", insertcolor=c["bright"], arrowcolor=c["muted"],
+                        font=self.font_normal)
+
+        # 背景：root（最底層）、card（卡片）、panel（分頁內容，預設）
+        style.configure("TFrame", background=c["panel"])
+        style.configure("Root.TFrame", background=c["root"])
+        style.configure("Card.TFrame", background=c["card"])
+        style.configure("Field.TFrame", background=c["field"])
+        style.configure("TLabel", background=c["panel"], foreground=c["text"])
+        style.configure("Muted.TLabel", background=c["panel"], foreground=c["muted"])
+        style.configure("Root.TLabel", background=c["root"], foreground=c["text"])
+        style.configure("RootMuted.TLabel", background=c["root"], foreground=c["muted"], font=self.font_small)
+        style.configure("Section.TLabel", background=c["root"], foreground=c["muted"], font=self.font_small_bold)
+        style.configure("Title.TLabel", background=c["root"], foreground=c["bright"], font=self.font_title)
+        style.configure("Pill.TLabel", background=c["accent"], foreground="#FFFFFF", font=self.font_small_bold,
+                        padding=(8, 1))
+        style.configure("Card.TLabel", background=c["card"], foreground=c["text"])
+        style.configure("CardMuted.TLabel", background=c["card"], foreground=c["muted"])
+        style.configure("Status.TLabel", background=c["card"], foreground=c["bright"], font=self.font_status)
+        style.configure("TSeparator", background=c["line"])
+
+        # 按鈕：一般（灰）、Accent（藍紫，主要動作）、Danger（紅，停止）。拿掉舊式的虛線焦點框。
+        style.layout("TButton", [("Button.border", {"sticky": "nswe", "border": "1", "children": [
+            ("Button.padding", {"sticky": "nswe", "children": [("Button.label", {"sticky": "nswe"})]})]})])
+        for name, normal, hover, press in (("TButton", "button", "button_hover", "button_press"),
+                                           ("Accent.TButton", "accent", "accent_hover", "accent_press"),
+                                           ("Danger.TButton", "danger", "danger_hover", "danger_press")):
+            colors = [("disabled", c["disabled"]), ("pressed", c[press]), ("active", c[hover])]
+            style.configure(name, background=c[normal], foreground="#FFFFFF", bordercolor=c[normal],
+                            lightcolor=c[normal], darkcolor=c[normal], relief="flat", padding=(16, 6),
+                            anchor="center", font=self.font_bold)
+            style.map(name, background=colors, bordercolor=colors, lightcolor=colors, darkcolor=colors,
+                      foreground=[("disabled", c["disabled_text"])])
+        style.configure("Small.TButton", padding=(12, 3), font=self.font_normal)      # 跟輸入框一樣高的小按鈕
+
+        # 勾選框：自己畫的圓角勾選框圖片（畫不出來就用 clam 原本的）
+        indicator = "Checkbutton.indicator"
+        try:
+            size, gap = max(14, round(16 * self.ui_scale)), round(7 * self.ui_scale)
+            images = {}
+            for name, checked, hover in (("off", False, False), ("off_hover", False, True),
+                                         ("on", True, False), ("on_hover", True, True)):
+                png = make_checkbox_png(size, checked, hover, gap)
+                images[name] = tk.PhotoImage(master=root, data=base64.b64encode(png).decode("ascii"))
+            self._check_images = images                  # 要留著，不然圖片會被回收
+            style.element_create("Badge.Checkbutton.indicator", "image", images["off"],
+                                 ("selected", "active", images["on_hover"]), ("selected", images["on"]),
+                                 ("active", images["off_hover"]), sticky="")
+            indicator = "Badge.Checkbutton.indicator"
+        except Exception:
+            write_log_file("[ERROR] " + traceback.format_exc())
+        style.layout("TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
+            (indicator, {"side": "left", "sticky": ""}),
+            ("Checkbutton.label", {"side": "left", "sticky": "nswe"})]})])
+        style.configure("TCheckbutton", background=c["panel"], foreground=c["text"], indicatorbackground=c["field"],
+                        indicatorforeground="#FFFFFF", upperbordercolor=c["line"], lowerbordercolor=c["line"],
+                        indicatormargin=(0, 0, 8, 0), padding=(0, 2))
+        style.map("TCheckbutton", background=[("active", c["panel"])],
+                  foreground=[("disabled", c["disabled_text"]), ("active", c["bright"])],
+                  indicatorbackground=[("selected", c["accent"]), ("active", c["hover"])],
+                  upperbordercolor=[("selected", c["accent"])], lowerbordercolor=[("selected", c["accent"])])
+
+        # 輸入框、數字框、下拉選單
+        for name in ("TEntry", "TSpinbox", "TCombobox"):
+            style.configure(name, fieldbackground=c["field"], foreground=c["bright"], background=c["field"],
+                            bordercolor=c["line"], lightcolor=c["field"], darkcolor=c["field"],
+                            arrowcolor=c["muted"], insertcolor=c["bright"], padding=(6, 3))
+            style.map(name, bordercolor=[("focus", c["accent"])], lightcolor=[("focus", c["field"])],
+                      fieldbackground=[("disabled", c["disabled"]), ("readonly", c["field"])],
+                      foreground=[("disabled", c["disabled_text"])], arrowcolor=[("active", c["bright"])],
+                      background=[("pressed", c["hover"]), ("active", c["hover"])])
+        style.map("TCombobox", selectbackground=[("readonly", c["field"])],
+                  selectforeground=[("readonly", c["bright"])])
+        for option, value in (("background", c["card"]), ("foreground", c["text"]),
+                              ("selectBackground", c["accent"]), ("selectForeground", "#FFFFFF"),
+                              ("font", self.font_normal), ("borderWidth", 0), ("relief", "flat")):
+            root.option_add("*TCombobox*Listbox." + option, value)      # 下拉選單展開後的清單
+
+        # 分頁標籤
+        style.configure("TNotebook", background=c["root"], borderwidth=0, bordercolor=c["root"],
+                        lightcolor=c["root"], darkcolor=c["root"], tabmargins=(0, 0, 0, 0))
+        style.layout("TNotebook.Tab", [("Notebook.tab", {"sticky": "nswe", "children": [
+            ("Notebook.padding", {"side": "top", "sticky": "nswe", "children": [
+                ("Notebook.label", {"side": "top", "sticky": ""})]})]})])
+        style.configure("TNotebook.Tab", background=c["root"], foreground=c["muted"], padding=(18, 8),
+                        bordercolor=c["root"], lightcolor=c["root"], darkcolor=c["root"], font=self.font_bold)
+        tab_colors = [("selected", c["panel"]), ("active", c["card"])]
+        style.map("TNotebook.Tab", background=tab_colors, bordercolor=tab_colors, lightcolor=tab_colors,
+                  darkcolor=tab_colors, foreground=[("selected", c["bright"]), ("active", c["text"])],
+                  padding=[("selected", (18, 8))], expand=[("selected", (0, 0, 0, 0))])
+
+        # 進度條、捲軸（沒有上下箭頭的細捲軸）
+        style.configure("Horizontal.TProgressbar", troughcolor=c["field"], background=c["accent"],
+                        bordercolor=c["field"], lightcolor=c["accent"], darkcolor=c["accent"], thickness=10)
+        style.layout("Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+            ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
+        for name, trough in (("Vertical.TScrollbar", c["field"]), ("Card.Vertical.TScrollbar", c["card"])):
+            style.configure(name, troughcolor=trough, background=c["button"], bordercolor=trough,
+                            lightcolor=c["button"], darkcolor=c["button"], arrowsize=10, gripcount=0)
+            thumb = [("pressed", c["button_hover"]), ("active", c["button_hover"])]
+            style.map(name, background=thumb, lightcolor=thumb, darkcolor=thumb)
+
+    @staticmethod
+    def _text_colors(background: str) -> dict:
+        """tk.Text、tk.Listbox 的深色設定（這兩種元件不吃 ttk 主題）。"""
+        c = COLORS
+        return {"background": background, "foreground": c["text"], "selectbackground": c["accent"],
+                "selectforeground": "#FFFFFF", "relief": "flat", "borderwidth": 0, "highlightthickness": 0}
+
+    def _make_icons(self) -> None:
+        """程式圖示（視窗左上角、工作列）。畫不出來也沒關係，就用預設圖示。"""
+        self.icon_large = self.icon_small = None
+        try:
+            self.icon_large = tk.PhotoImage(master=self.root, data=base64.b64encode(make_icon_png(64)).decode("ascii"))
+            self.icon_small = tk.PhotoImage(master=self.root, data=base64.b64encode(make_icon_png(32)).decode("ascii"))
+            self.root.iconphoto(True, self.icon_large, self.icon_small)
+        except Exception:
+            write_log_file("[ERROR] " + traceback.format_exc())
 
     def _build_ui(self) -> None:
         root = self.root
         try:      # 螢幕縮放 125%、150% 時，視窗跟著放大，並且不要超出螢幕
             factor = max(1.0, float(root.tk.call("tk", "scaling")) / (96 / 72))
-            width = min(int(860 * factor), root.winfo_screenwidth() - 40)
-            height = min(int(760 * factor), root.winfo_screenheight() - 80)
+            width = min(int(880 * factor), root.winfo_screenwidth() - 40)
+            height = min(int(820 * factor), root.winfo_screenheight() - 80)
         except (tk.TclError, ValueError, TypeError):
-            factor, width, height = 1.0, 860, 760
-        self.wrap = int(780 * factor)            # 說明文字的換行寬度
+            factor, width, height = 1.0, 880, 820
+        self.wrap = int(800 * factor)            # 說明文字的換行寬度
+        self.ui_scale = factor
         root.geometry(f"{width}x{height}")
-        root.minsize(min(760, width), min(620, height))
+        root.minsize(min(780, width), min(640, height))
         self._setup_fonts()
+        self._setup_theme()
+        self._make_icons()
 
-        top = ttk.Frame(root, padding=(12, 10, 12, 0))
-        top.pack(fill="x")
-        discord_box = ttk.Frame(top)
-        discord_box.grid(row=0, column=0, sticky="w")
-        self.lbl_discord = ttk.Label(discord_box)
-        self.lbl_discord.pack(side="left")
-        self.btn_discord = self.translate(ttk.Button(discord_box, command=self.open_discord), "open_discord")
-        self.btn_discord.pack(side="left", padx=(8, 0))
-        self.lbl_runner = ttk.Label(top)
-        self.lbl_runner.grid(row=0, column=1, sticky="w", padx=(24, 0))
-        language_box = ttk.Frame(top)
-        language_box.grid(row=0, column=2, sticky="e")
-        ttk.Label(language_box, text="語言 / Language:").pack(side="left", padx=(0, 4))
+        # ---- 標題列：圖示、名稱、版本、語言 ----
+        header = ttk.Frame(root, style="Root.TFrame", padding=(16, 12, 16, 2))
+        header.pack(fill="x")
+        if self.icon_small is not None:
+            ttk.Label(header, image=self.icon_small, style="Root.TLabel").pack(side="left", padx=(0, 10))
+        self.translate(ttk.Label(header, style="Title.TLabel"), "app_name").pack(side="left")
+        ttk.Label(header, text="v" + VERSION, style="Pill.TLabel").pack(side="left", padx=(10, 0))
+        language_box = ttk.Frame(header, style="Root.TFrame")
+        language_box.pack(side="right")
+        ttk.Label(language_box, text="語言 / Language", style="RootMuted.TLabel").pack(side="left", padx=(0, 6))
         self.cmb_language = ttk.Combobox(language_box, state="readonly", width=12, values=LANGUAGE_LABELS)
         self.cmb_language.current(LANGUAGE_CHOICES.index(self.state.settings["language"]))
         self.cmb_language.bind("<<ComboboxSelected>>", self._on_language_selected)
         self.cmb_language.pack(side="left")
-        self.lbl_library = ttk.Label(top)
-        self.lbl_library.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        self.btn_reload = self.translate(ttk.Button(top, command=self.reload_library, state="disabled"),
-                                         "reload_list")
-        self.btn_reload.grid(row=1, column=2, sticky="e", pady=(4, 0))
-        top.columnconfigure(1, weight=1)
 
-        bar = ttk.Frame(root, padding=(12, 8, 12, 0))
-        bar.pack(fill="x")
-        self.lbl_status = ttk.Label(bar, font=self.font_bold)
-        self.lbl_status.pack(side="left")
-        self.translate(ttk.Button(bar, command=self.stop_all), "stop_all").pack(side="right")
-        self.lbl_total = ttk.Label(root, text="", foreground=GRAY, padding=(12, 2, 12, 0))
-        self.lbl_total.pack(fill="x")
+        # ---- 狀態卡片：目前狀態、全部停止、Discord／執行器／遊戲清單 ----
+        card = ttk.Frame(root, style="Card.TFrame", padding=(16, 12))
+        card.pack(fill="x", padx=12, pady=(10, 0))
+        card.columnconfigure(0, weight=1)
+        self.lbl_status = ttk.Label(card, style="Status.TLabel")
+        self.lbl_status.grid(row=0, column=0, sticky="w")
+        self.lbl_total = ttk.Label(card, text="", style="CardMuted.TLabel")
+        self.lbl_total.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.btn_stop_all = self.translate(ttk.Button(card, command=self.stop_all, style="Danger.TButton"),
+                                           "stop_all")
+        self.btn_stop_all.grid(row=0, column=1, rowspan=2, sticky="e")
+        ttk.Separator(card).grid(row=2, column=0, columnspan=2, sticky="ew", pady=10)
+        chips = ttk.Frame(card, style="Card.TFrame")
+        chips.grid(row=3, column=0, columnspan=2, sticky="ew")
+        chips.columnconfigure(3, weight=1)
+        self.lbl_discord = ttk.Label(chips, style="Card.TLabel")
+        self.lbl_discord.grid(row=0, column=0, sticky="w")
+        self.btn_discord = self.translate(ttk.Button(chips, command=self.open_discord, style="Small.TButton"),
+                                          "open_discord")
+        self.btn_discord.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.lbl_runner = ttk.Label(chips, style="Card.TLabel")
+        self.lbl_runner.grid(row=0, column=2, sticky="w", padx=(28, 0))
+        self.lbl_library = ttk.Label(chips, style="CardMuted.TLabel")
+        self.lbl_library.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.btn_reload = self.translate(ttk.Button(chips, command=self.reload_library, state="disabled",
+                                                    style="Small.TButton"), "reload_list")
+        self.btn_reload.grid(row=1, column=3, sticky="e", pady=(6, 0))
+
+        # ---- 紀錄（先放在最下面，視窗太矮時才不會被擠掉）----
+        log_box = ttk.Frame(root, style="Root.TFrame", padding=(12, 0, 12, 12))
+        log_box.pack(side="bottom", fill="x")
+        self.translate(ttk.Label(log_box, style="Section.TLabel"), "log_title").pack(anchor="w", pady=(0, 4))
+        log_card = ttk.Frame(log_box, style="Card.TFrame")
+        log_card.pack(fill="x")
+        self.txt_log = tk.Text(log_card, height=5, wrap="word", state="disabled", font=self.font_small,
+                               padx=12, pady=8, **self._text_colors(COLORS["card"]))
+        scroll = ttk.Scrollbar(log_card, orient="vertical", command=self.txt_log.yview,
+                               style="Card.Vertical.TScrollbar")
+        self.txt_log.configure(yscrollcommand=scroll.set)
+        self.txt_log.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y", pady=4)
 
         notebook = ttk.Notebook(root)
-        notebook.pack(fill="both", expand=True, padx=12, pady=8)
+        notebook.pack(fill="both", expand=True, padx=12, pady=(12, 12))
         self.notebook = notebook
         self._build_hours_tab(notebook)
         self._build_variety_tab(notebook)
         self._build_stream_tab(notebook)
         self._build_help_tab(notebook)
 
-        log_frame = self.translate(ttk.LabelFrame(root, padding=(6, 4)), "log_title")
-        log_frame.pack(fill="x", padx=12, pady=(0, 12))
-        self.txt_log = tk.Text(log_frame, height=6, wrap="word", state="disabled", font=self.font_normal)
-        scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.txt_log.yview)
-        self.txt_log.configure(yscrollcommand=scroll.set)
-        self.txt_log.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-
     def _build_hours_tab(self, notebook) -> None:
-        tab = ttk.Frame(notebook, padding=10)
+        tab = ttk.Frame(notebook, padding=(16, 14))
         self.tab_hours = tab
         self._add_tab(notebook, tab, "tab_hours")
-        self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap), "hours_intro").pack(anchor="w")
+        self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap, style="Muted.TLabel"),
+                       "hours_intro").pack(anchor="w")
 
-        self.picker_hours = GamePicker(tab, self, height=6, mode_key="hours_pick")
-        self.picker_hours.pack(fill="both", expand=True, pady=(8, 6))
-
-        row = ttk.Frame(tab)
-        row.pack(fill="x")
-        self.translate(ttk.Label(row), "parallel_label").pack(side="left")
-        ttk.Spinbox(row, from_=1, to=MAX_PARALLEL, width=4, textvariable=self.var_hours_parallel).pack(side="left")
-        self.translate(ttk.Label(row), "games_unit").pack(side="left", padx=(4, 20))
-        self.translate(ttk.Checkbutton(row, variable=self.var_minimized), "minimize_windows").pack(side="left")
+        # 下面的設定和按鈕從底部往上排：視窗太矮時只會縮短遊戲清單，按鈕不會被擠掉
+        self.lbl_hours_info = ttk.Label(tab, text="", wraplength=self.wrap, justify="left", style="Muted.TLabel")
+        self.lbl_hours_info.pack(side="bottom", anchor="w", pady=(8, 0))
 
         row = ttk.Frame(tab)
-        row.pack(fill="x", pady=(6, 0))
-        self.translate(ttk.Label(row), "hours_current_label").pack(side="left")
-        ttk.Spinbox(row, from_=0, to=1000000, width=8, textvariable=self.var_hours_current).pack(side="left")
-        self.lbl_hours_calc = ttk.Label(row, text="")
-        self.lbl_hours_calc.pack(side="left", padx=(8, 0))
+        row.pack(side="bottom", fill="x", pady=(14, 0))
+        self.btn_hours = ttk.Button(row, command=self.toggle_hours, style="Accent.TButton")
+        self.btn_hours.pack(side="left")
+        self.btn_swap = self.translate(ttk.Button(row, command=self.swap_hours_game, state="disabled"), "swap_game")
+        self.btn_swap.pack(side="left", padx=(8, 0))
 
         row = ttk.Frame(tab)
-        row.pack(fill="x", pady=(6, 0))
+        row.pack(side="bottom", fill="x", pady=(8, 0))
+        self.translate(ttk.Checkbutton(row, variable=self.var_boot, command=self.toggle_boot),
+                       "boot_start").pack(side="left")
+        self.translate(ttk.Checkbutton(row, variable=self.var_auto_start, command=self._save_settings),
+                       "auto_start").pack(side="left", padx=(24, 0))
+
+        row = ttk.Frame(tab)
+        row.pack(side="bottom", fill="x", pady=(8, 0))
         self.translate(ttk.Checkbutton(row, variable=self.var_auto_stop, command=self._apply_auto_stop),
                        "auto_stop_label").pack(side="left")
         low, high = AUTO_STOP_LIMITS
         spin = ttk.Spinbox(row, from_=low, to=high, increment=0.5, width=7, textvariable=self.var_auto_stop_hours)
-        spin.pack(side="left", padx=(4, 0))
+        spin.pack(side="left", padx=(6, 0))
         spin.bind("<FocusOut>", self._tidy_auto_stop_text)    # 數字改了會自動套用（見 _bind_traces）
-        self.translate(ttk.Label(row), "auto_stop_unit").pack(side="left", padx=(4, 0))
+        self.translate(ttk.Label(row), "auto_stop_unit").pack(side="left", padx=(6, 0))
 
         row = ttk.Frame(tab)
-        row.pack(fill="x", pady=(6, 0))
-        self.translate(ttk.Checkbutton(row, variable=self.var_boot, command=self.toggle_boot),
-                       "boot_start").pack(side="left")
-        self.translate(ttk.Checkbutton(row, variable=self.var_auto_start, command=self._save_settings),
-                       "auto_start").pack(side="left", padx=(20, 0))
+        row.pack(side="bottom", fill="x", pady=(8, 0))
+        self.translate(ttk.Label(row), "hours_current_label").pack(side="left")
+        ttk.Spinbox(row, from_=0, to=1000000, width=8, textvariable=self.var_hours_current).pack(side="left",
+                                                                                               padx=(6, 0))
+        self.lbl_hours_calc = ttk.Label(row, text="", style="Muted.TLabel")
+        self.lbl_hours_calc.pack(side="left", padx=(10, 0))
 
         row = ttk.Frame(tab)
-        row.pack(fill="x", pady=(10, 0))
-        self.btn_hours = ttk.Button(row, command=self.toggle_hours)
-        self.btn_hours.pack(side="left")
-        self.btn_swap = self.translate(ttk.Button(row, command=self.swap_hours_game, state="disabled"), "swap_game")
-        self.btn_swap.pack(side="left", padx=(8, 0))
-        self.lbl_hours_info = ttk.Label(tab, text="", wraplength=self.wrap, justify="left")
-        self.lbl_hours_info.pack(anchor="w", pady=(6, 0))
+        row.pack(side="bottom", fill="x", pady=(10, 0))
+        self.translate(ttk.Label(row), "parallel_label").pack(side="left")
+        ttk.Spinbox(row, from_=1, to=MAX_PARALLEL, width=4, textvariable=self.var_hours_parallel).pack(side="left",
+                                                                                                     padx=(6, 0))
+        self.translate(ttk.Label(row), "games_unit").pack(side="left", padx=(6, 24))
+        self.translate(ttk.Checkbutton(row, variable=self.var_minimized), "minimize_windows").pack(side="left")
+
+        self.picker_hours = GamePicker(tab, self, height=6, mode_key="hours_pick")
+        self.picker_hours.pack(fill="both", expand=True, pady=(12, 0))
 
     def _build_variety_tab(self, notebook) -> None:
-        tab = ttk.Frame(notebook, padding=10)
+        tab = ttk.Frame(notebook, padding=(16, 14))
         self._add_tab(notebook, tab, "tab_variety")
-        self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap), "variety_intro").pack(anchor="w")
+        self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap, style="Muted.TLabel"),
+                       "variety_intro").pack(anchor="w")
 
         grid = ttk.Frame(tab)
-        grid.pack(fill="x", pady=(10, 0))
+        grid.pack(fill="x", pady=(12, 0))
         fields = [
             ("games_current_label", self.var_games_current, 0, 100000),
             ("games_target_label", self.var_games_target, 1, 100000),
@@ -2295,72 +2632,87 @@ class App:
             ("variety_parallel_label", self.var_variety_parallel, 1, MAX_PARALLEL),
         ]
         for index, (key, var, low, high) in enumerate(fields):
-            self.translate(ttk.Label(grid), key).grid(row=index, column=0, sticky="w", pady=2)
-            ttk.Spinbox(grid, from_=low, to=high, width=8, textvariable=var).grid(row=index, column=1, sticky="w", pady=2)
+            self.translate(ttk.Label(grid), key).grid(row=index, column=0, sticky="w", pady=3)
+            ttk.Spinbox(grid, from_=low, to=high, width=8, textvariable=var).grid(row=index, column=1, sticky="w",
+                                                                                  padx=(10, 0), pady=3)
 
         self.lbl_variety_plan = ttk.Label(tab, text="", wraplength=self.wrap, justify="left")
-        self.lbl_variety_plan.pack(anchor="w", pady=(8, 0))
-        self.translate(ttk.Checkbutton(tab, variable=self.var_then_hours), "then_hours").pack(anchor="w", pady=(6, 0))
+        self.lbl_variety_plan.pack(anchor="w", pady=(10, 0))
+        self.translate(ttk.Checkbutton(tab, variable=self.var_then_hours), "then_hours").pack(anchor="w", pady=(8, 0))
 
         row = ttk.Frame(tab)
-        row.pack(fill="x", pady=(10, 0))
-        self.btn_variety = ttk.Button(row, command=self.toggle_variety)
+        row.pack(fill="x", pady=(14, 0))
+        self.btn_variety = ttk.Button(row, command=self.toggle_variety, style="Accent.TButton")
         self.btn_variety.pack(side="left")
         self.translate(ttk.Button(row, command=self.clear_played), "clear_played").pack(side="left", padx=(8, 0))
 
         self.progress = ttk.Progressbar(tab, mode="determinate", maximum=1)
-        self.progress.pack(fill="x", pady=(10, 0))
+        self.progress.pack(fill="x", pady=(14, 0))
         self.lbl_variety_info = ttk.Label(tab, text="", wraplength=self.wrap, justify="left")
-        self.lbl_variety_info.pack(anchor="w", pady=(6, 0))
-        self.lbl_played = ttk.Label(tab, text="", foreground=GRAY)
+        self.lbl_variety_info.pack(anchor="w", pady=(8, 0))
+        self.lbl_played = ttk.Label(tab, text="", style="Muted.TLabel")
         self.lbl_played.pack(anchor="w", pady=(4, 0))
 
     def _build_stream_tab(self, notebook) -> None:
-        tab = ttk.Frame(notebook, padding=10)
+        tab = ttk.Frame(notebook, padding=(16, 14))
         self._add_tab(notebook, tab, "tab_stream")
-        self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap), "stream_intro").pack(anchor="w")
+        self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap, style="Muted.TLabel"),
+                       "stream_intro").pack(anchor="w")
 
-        self.picker_stream = GamePicker(tab, self, height=6, mode_key="stream_pick")
-        self.picker_stream.pack(fill="both", expand=True, pady=(8, 6))
-
-        row = ttk.Frame(tab)
-        row.pack(fill="x")
-        self.translate(ttk.Label(row), "stream_current_label").pack(side="left")
-        ttk.Spinbox(row, from_=0, to=1000000, width=8, textvariable=self.var_stream_current).pack(side="left")
-        self.lbl_stream_calc = ttk.Label(row, text="")
-        self.lbl_stream_calc.pack(side="left", padx=(8, 0))
+        self.lbl_stream_info = ttk.Label(tab, text="", style="Muted.TLabel")
+        self.lbl_stream_info.pack(side="bottom", anchor="w", pady=(8, 0))
 
         row = ttk.Frame(tab)
-        row.pack(fill="x", pady=(10, 0))
-        self.btn_stream_open = self.translate(ttk.Button(row, command=self.open_stream), "open_stream")
+        row.pack(side="bottom", fill="x", pady=(14, 0))
+        self.btn_stream_open = self.translate(ttk.Button(row, command=self.open_stream, style="Accent.TButton"),
+                                              "open_stream")
         self.btn_stream_open.pack(side="left")
         self.btn_stream_close = self.translate(ttk.Button(row, command=self.close_stream, state="disabled"),
                                                "close_stream")
         self.btn_stream_close.pack(side="left", padx=(8, 0))
-        self.lbl_stream_info = ttk.Label(tab, text="")
-        self.lbl_stream_info.pack(anchor="w", pady=(6, 0))
+
+        row = ttk.Frame(tab)
+        row.pack(side="bottom", fill="x", pady=(10, 0))
+        self.translate(ttk.Label(row), "stream_current_label").pack(side="left")
+        ttk.Spinbox(row, from_=0, to=1000000, width=8, textvariable=self.var_stream_current).pack(side="left",
+                                                                                                padx=(6, 0))
+        self.lbl_stream_calc = ttk.Label(row, text="", style="Muted.TLabel")
+        self.lbl_stream_calc.pack(side="left", padx=(10, 0))
+
+        self.picker_stream = GamePicker(tab, self, height=6, mode_key="stream_pick")
+        self.picker_stream.pack(fill="both", expand=True, pady=(12, 0))
 
     def _build_help_tab(self, notebook) -> None:
-        tab = ttk.Frame(notebook, padding=10)
+        tab = ttk.Frame(notebook, padding=(16, 14))
         self._add_tab(notebook, tab, "tab_help")
         row = ttk.Frame(tab)
-        row.pack(side="bottom", fill="x", pady=(8, 0))
-        self.btn_check = self.translate(ttk.Button(row, command=self.run_self_check), "check_fix")
+        row.pack(side="bottom", fill="x", pady=(12, 0))
+        self.btn_check = self.translate(ttk.Button(row, command=self.run_self_check, style="Accent.TButton"),
+                                        "check_fix")
         self.btn_check.pack(side="left", padx=(0, 8))
         self.translate(ttk.Button(row, command=self.open_data_dir), "open_folder").pack(side="left")
         self.translate(ttk.Button(row, command=self.clear_bad), "clear_bad").pack(side="left", padx=(8, 0))
         self.translate(ttk.Button(row, command=self.delete_fake_files), "delete_files").pack(side="left", padx=(8, 0))
 
-        self.txt_help = tk.Text(tab, wrap="word", font=self.font_normal, height=12, state="disabled")
-        scroll = ttk.Scrollbar(tab, orient="vertical", command=self.txt_help.yview)
+        box = ttk.Frame(tab, style="Field.TFrame")
+        box.pack(fill="both", expand=True)
+        self.txt_help = tk.Text(box, wrap="word", font=self.font_normal, height=12, state="disabled",
+                                padx=14, pady=10, spacing1=1, spacing3=1, **self._text_colors(COLORS["field"]))
+        scroll = ttk.Scrollbar(box, orient="vertical", command=self.txt_help.yview)
         self.txt_help.configure(yscrollcommand=scroll.set)
         self.txt_help.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
     def _render_help(self) -> None:
+        text = t("help_text", data_dir=DATA_DIR, days=NEW_GAME_DAYS)
         self.txt_help.configure(state="normal")
         self.txt_help.delete("1.0", "end")
-        self.txt_help.insert("1.0", t("help_text", data_dir=DATA_DIR, days=NEW_GAME_DAYS))
+        self.txt_help.insert("1.0", text)
+        self.txt_help.tag_configure("heading", font=self.font_bold, foreground=COLORS["bright"], spacing1=4)
+        for number, line in enumerate(text.splitlines(), start=1):      # 小標題（【…】或全大寫）用粗體
+            line = line.strip()
+            if (line.startswith("\u3010") and line.endswith("\u3011")) or (line and line.isupper()):   # 【】
+                self.txt_help.tag_add("heading", f"{number}.0", f"{number}.end")
         self.txt_help.configure(state="disabled")
 
     def _render_top_labels(self) -> None:
@@ -2668,17 +3020,20 @@ class App:
             text += t("status_streaming")
         self.lbl_status.configure(text=text)
         self.lbl_total.configure(text=t("total_idle", hours=self.state.total_seconds / 3600))
+        busy = idler.mode is not None or self.stream_game is not None       # 沒在掛機時「全部停止」變灰色
+        self.btn_stop_all.configure(state="normal" if busy else "disabled",
+                                    style="Danger.TButton" if busy else "TButton")
 
         # 時數分頁
         if idler.mode == "hours":
             names = t("sep").join(fake.game.name for fake in idler.slots)
             self.lbl_hours_info.configure(text=t("running_list", names=names))
-            self.btn_hours.configure(text=t("stop_hours"))
+            self.btn_hours.configure(text=t("stop_hours"), style="Danger.TButton")
             self.btn_swap.configure(state="normal")
         else:
             stopped = t("auto_stopped", time=fmt_hours_minutes(idler.auto_stopped)) if idler.auto_stopped else ""
             self.lbl_hours_info.configure(text=stopped)
-            self.btn_hours.configure(text=t("start_hours"))
+            self.btn_hours.configure(text=t("start_hours"), style="Accent.TButton")
             self.btn_swap.configure(state="disabled")
 
         # 款數分頁
@@ -2691,14 +3046,14 @@ class App:
                 "variety_info", parts=t("sep").join(parts) or "—", done=idler.variety_done,
                 skipped=idler.variety_skipped, queued=len(idler.queue),
                 eta=fmt_hours_minutes(idler.variety_eta_seconds())))
-            self.btn_variety.configure(text=t("stop_variety"))
+            self.btn_variety.configure(text=t("stop_variety"), style="Danger.TButton")
         else:
             if idler.last_result is not None:
                 done, skipped = idler.last_result
                 self.lbl_variety_info.configure(text=t("last_summary", done=done, skipped=skipped))
             else:
                 self.lbl_variety_info.configure(text="")
-            self.btn_variety.configure(text=t("start_variety"))
+            self.btn_variety.configure(text=t("start_variety"), style="Accent.TButton")
         self.lbl_played.configure(text=t("played_count", count=len(self.state.opened_ids)))
 
         # 直播分頁
