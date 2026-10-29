@@ -10,7 +10,7 @@ A small Windows app that grows Discord's activity badges by running dummy "games
 | Games played (Sampler → … → Maverick → Polymath → Universalist, 100+) | Cycles through games you haven't played, a few minutes each |
 | Streaming (Newcomer → … → Star → Phenomenon) | Opens a window you can Go Live with. Someone still has to watch. |
 
-The interface follows your Windows display language (Traditional Chinese or English). You can switch it any time from the language menu at the top right.
+The interface uses a dark, Discord-style theme and follows your Windows display language (Traditional Chinese or English). You can switch it any time from the language menu at the top right.
 
 ## How it works
 
