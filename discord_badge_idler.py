@@ -57,7 +57,7 @@ except ImportError:  # 少數 Python 安裝沒有 tkinter
 # 基本設定
 # ============================================================================
 
-VERSION = "1.3"
+VERSION = "1.5"
 
 # 用 Nuitka 或 PyInstaller 打包成 exe 時為 True
 IS_FROZEN = bool(getattr(sys, "frozen", False)) or "__compiled__" in globals()
@@ -70,8 +70,14 @@ DETECTABLE_SOURCES = [
 LIST_MAX_AGE = 24 * 3600          # 遊戲清單超過一天就重新下載
 USER_CLOSED_EXIT_CODE = 2         # 假遊戲視窗被使用者手動關掉時的結束代碼（C# 那邊定義的）
 MAX_PARALLEL = 100                # 「同時執行」最多幾款
-PICK_MODES = ("all", "opened", "unopened")   # 遊戲清單範圍：全部／開過的／沒開過的
+AUTO_STOP_LIMITS = (0.5, 10000.0)  # 「掛滿幾小時後自動停止」可以設定的範圍（小時）
+PICK_MODES = ("all", "opened", "unopened", "new")   # 遊戲清單範圍：全部／開過的／沒開過的／新遊戲
 OPENED_MARK = "✓ "                # 清單裡「開過」的遊戲前面加這個記號
+NEW_MARK = "★ "                   # 清單裡「新遊戲」前面加這個記號
+NEW_GAME_DAYS = 14                # Discord 新增的遊戲，幾天內算「新遊戲」
+GAME_RULES_VERSION = 1            # 挑選可模擬遊戲的規則改了就加 1（規則放寬多出來的遊戲不會被當成新遊戲）
+LIST_CHECK_MS = 3600 * 1000       # 程式開著時，每小時看一次遊戲清單是不是超過一天沒更新
+LIST_RETRY_SECONDS = 3 * 3600     # 清單太舊但更新失敗（例如沒網路）時，隔多久再試一次
 DISCORD_PROCESS_NAMES = {"discord.exe", "discordptb.exe", "discordcanary.exe", "discorddevelopment.exe"}
 # Discord 電腦版的安裝位置（%LOCALAPPDATA%\<資料夾>\Update.exe）
 DISCORD_INSTALLS = (("Discord", "Discord.exe"), ("DiscordPTB", "DiscordPTB.exe"), ("DiscordCanary", "DiscordCanary.exe"))
@@ -100,6 +106,8 @@ DEFAULT_SETTINGS = {
     "then_hours": True,
     "minimized": False,
     "auto_start": False,
+    "auto_stop": False,           # 掛時數掛滿幾小時後自動停止
+    "auto_stop_hours": 8.0,
     "stream_current": 0,
     "hours_pick": "all",          # 時數分頁的遊戲清單範圍
     "stream_pick": "all",         # 直播分頁的遊戲清單範圍
@@ -122,6 +130,8 @@ DATA_DIR = get_data_dir()
 GAMES_DIR = DATA_DIR / "games"        # 假遊戲 exe 放這裡：games\<遊戲ID>\<exe 路徑>
 RUNNER_DIR = DATA_DIR / "runner"      # 編譯好的假遊戲執行器
 CACHE_FILE = DATA_DIR / "detectable.json"
+SOURCE_FILE = DATA_DIR / "detectable_source.txt"   # 快取的清單是從哪個網址下載的
+KNOWN_FILE = DATA_DIR / "known_games.json"         # 看過的所有遊戲 ID，用來找出新遊戲
 STATE_FILE = DATA_DIR / "state.json"
 LOG_FILE = DATA_DIR / "log.txt"
 
@@ -213,6 +223,11 @@ STRINGS = {
     "game_done": ("完成第 {count} 款：{name}", "Finished game #{count}: {name}"),
     "hours_stopped_empty": ("沒有假遊戲在執行了，時數模式已停止。",
                             "No dummy games are running anymore, so hours mode stopped."),
+    "auto_stop_set": ("再掛 {time}後會自動停止。", "Hours mode will stop automatically after {time} more of idling."),
+    "auto_stop_off": ("已取消自動停止。", "Auto-stop is off."),
+    "auto_stopped": ("設定的 {time}掛滿了，自動停止。", "The {time} you set is up, so hours mode stopped automatically."),
+    "no_new_games_fallback": ("沒有可以用的新遊戲，改從全部遊戲裡挑。",
+                              "No new games are available, so picking from all games instead."),
 
     # ---- 遊戲選擇 ----
     "search_label": ("搜尋遊戲：", "Search games:"),
@@ -225,6 +240,7 @@ STRINGS = {
     "filter_all": ("全部遊戲", "All games"),
     "filter_opened": ("只看開過的", "Opened before"),
     "filter_unopened": ("只看沒開過的", "Never opened"),
+    "filter_new": ("只看新遊戲", "New games"),
     "only_n_matched": ("符合條件的遊戲只有 {count} 款。", "Only {count} games match the filter."),
     "no_match": ("沒有符合條件的遊戲可以挑，可以把範圍改成「全部遊戲」。",
                  "No games match the filter. Try switching to \"All games\"."),
@@ -250,6 +266,7 @@ STRINGS = {
                      "Status: hours mode ({count} running) | this session {time}"),
     "status_variety": ("目前狀態：跑款數中（完成 {done}／{total}）｜本次 {time}",
                        "Status: games-played mode ({done}/{total} done) | this session {time}"),
+    "status_auto_stop": ("｜{time}後自動停止", " | stops in {time}"),
     "status_paused": ("｜Discord 沒開，暫停計時", " | Discord isn't running, timer paused"),
     "status_streaming": ("｜直播視窗開啟中", " | stream window open"),
     "total_idle": ("這個程式累計掛機：{hours:.1f} 小時（只算 Discord 有開的時間）",
@@ -272,6 +289,9 @@ STRINGS = {
     "hours_current_label": ("Discord 上目前的遊戲時數：", "Current game hours on Discord:"),
     "boot_start": ("開機時自動開啟這個程式", "Open this app when Windows starts"),
     "auto_start": ("程式開啟後自動開始掛時數", "Start hours mode when the app opens"),
+    "auto_stop_label": ("掛滿", "Stop automatically after"),
+    "auto_stop_unit": ("小時後自動停止（Discord 沒開的時間不算）",
+                       "hours of idling (time with Discord closed doesn't count)"),
     "start_hours": ("開始掛時數", "Start hours mode"),
     "stop_hours": ("停止掛時數", "Stop hours mode"),
     "swap_game": ("Discord 沒偵測到？換一款", "Not detected by Discord? Switch game"),
@@ -345,11 +365,14 @@ STRINGS = {
 【三種徽章】
 ・遊戲時數：假遊戲在跑、Discord 開著，掛 1 小時就是 1 小時，沒辦法加速。
 ・遊戲款數：每款預設跑 15 分鐘就換下一款。開過的遊戲都會記下來，款數模式只挑沒開過的。
-・遊戲清單的「範圍」可以切換：全部遊戲／只看開過的／只看沒開過的，隨機挑選也會照這個範圍。
+・遊戲清單的「範圍」可以切換：全部遊戲／只看開過的／只看沒開過的／只看新遊戲，隨機挑選也會照這個範圍。
+・遊戲清單每天會自動更新。Discord 新增遊戲時程式會通知你，新遊戲前面有 ★（{days} 天內）。
 ・直播時數：一定要有人在看才會算，這個程式只提供可以拿來直播的假遊戲視窗。
 
 【小提醒】
 ・掛機時程式會阻止電腦「自動」睡眠（螢幕還是會關）。手動睡眠、闔上筆電或關機就會中斷。
+・時數分頁可以勾「掛滿 N 小時後自動停止」，時間到就會自己停（Discord 沒開的時間不算；
+  掛到一半才勾選或修改的話，從那時候開始倒數）。
 ・徽章進度不一定即時更新，可能要過一段時間（甚至一天）才會變。
 ・如果徽章一直沒增加，可以到 Discord 設定的「活動隱私」，確認有開啟分享偵測到的活動。
 ・Discord 隨時可能改變偵測方式，不保證一定會被計入。
@@ -378,13 +401,18 @@ THE THREE BADGES
 • Game hours: with a dummy game running and Discord open, 1 hour idled is 1 hour. It can't be sped up.
 • Games played: by default each game runs 15 minutes, then the next one starts.
   Every game the app opens is remembered, and this mode only picks games it has never opened.
-• The game list's "Show" menu switches between all games, games opened before, and games never
-  opened. Random picks follow that choice.
+• The game list's "Show" menu switches between all games, games opened before, games never
+  opened, and new games. Random picks follow that choice.
+• The game list updates itself every day. When Discord adds games, the app tells you, and new
+  games are marked with ★ for {days} days.
 • Streaming: only counts while someone is actually watching. This app only provides a window you can stream.
 
 GOOD TO KNOW
 • While idling, the app stops Windows from going to sleep on its own (the screen can still turn off).
   Manual sleep, closing a laptop lid, or shutting down will interrupt it.
+• On the Game hours tab, "Stop automatically after N hours of idling" stops hours mode by itself
+  when the time is up. Time with Discord closed doesn't count. If you turn it on or change it while
+  hours mode is running, the countdown starts from that moment.
 • Badge progress may not update right away; it can take a while (even a day).
 • If a badge never goes up, check Discord Settings → Activity Privacy and make sure
   sharing your detected activity is turned on.
@@ -419,6 +447,17 @@ up more than usual, then decide.
     "library_ready_log": ("遊戲清單載入完成，可以模擬的有 {count:,} 款。",
                           "Game list loaded: {count:,} games can be simulated."),
     "library_failed_log": ("遊戲清單載入失敗：{error}", "Failed to load the game list: {error}"),
+    "list_auto_refresh": ("遊戲清單超過一天沒更新了，自動重新下載。",
+                          "The game list is over a day old, so it's being downloaded again."),
+    "new_games_log": ("Discord 新增了 {count} 款可以掛的遊戲：{names}",
+                      "Discord added {count} new games you can idle: {names}"),
+    "new_games_dialog": ("Discord 新增了 {count} 款可以掛的遊戲：\n\n{names}\n\n"
+                         "新遊戲在清單裡前面會有 ★（{days} 天內都算新的）。\n"
+                         "要在「遊戲時數」的清單裡只顯示新遊戲嗎？",
+                         "Discord added {count} new games you can idle:\n\n{names}\n\n"
+                         "New games are marked with ★ in the list for {days} days.\n"
+                         "Show only the new games in the Game hours list?"),
+    "and_more": ("…還有 {count} 款", "…and {count} more"),
     "auto_starting": ("依照設定，自動開始掛時數。", "Starting hours mode automatically (as set)."),
     "stream_window_closed": ("直播視窗被關閉了。", "The stream window was closed."),
     "runner_not_ready": ("假遊戲執行器還在準備中，請稍等幾秒。",
@@ -727,6 +766,7 @@ class GameLibrary:
         self.games = sorted(games, key=lambda g: g.name.lower())
         self.by_id = {g.id: g for g in self.games}
         self.total_apps = total_apps
+        self.source = ""                  # 清單是從哪個網址來的（用來判斷是不是 Discord 官方清單）
 
     @classmethod
     def from_raw(cls, raw, games_dir=None, max_path: int = 240) -> GameLibrary:
@@ -801,10 +841,33 @@ def download_list(url: str, timeout: float = 60) -> bytes:
         return response.read()
 
 
+def remember_list_source(url: str) -> None:
+    """記下快取清單是從哪個網址下載的，連同快取檔的大小和修改時間（快取被別的程式改過就對不上）。"""
+    try:
+        info = CACHE_FILE.stat()
+        SOURCE_FILE.write_text(json.dumps({"url": url, "size": info.st_size, "mtime_ns": info.st_mtime_ns}),
+                               encoding="utf-8")
+    except OSError:
+        pass
+
+
+def cached_list_source() -> str:
+    """快取清單的來源網址。快取被別的程式（例如舊版）換過、或紀錄壞掉時回傳空字串。"""
+    try:
+        data = json.loads(SOURCE_FILE.read_text(encoding="utf-8"))
+        info = CACHE_FILE.stat()
+        if data.get("size") == info.st_size and data.get("mtime_ns") == info.st_mtime_ns:
+            url = data.get("url")
+            return url if isinstance(url, str) else ""
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return ""
+
+
 def load_library(force_download: bool = False, log=print) -> GameLibrary:
     """讀取遊戲清單：太舊或強制更新就重新下載，下載失敗就用之前存的。"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    raw = None
+    raw, source = None, ""
     fresh = CACHE_FILE.exists() and time.time() - CACHE_FILE.stat().st_mtime < LIST_MAX_AGE
     if force_download or not fresh:
         for url in DETECTABLE_SOURCES:
@@ -817,7 +880,8 @@ def load_library(force_download: bool = False, log=print) -> GameLibrary:
                 temp = CACHE_FILE.with_suffix(".tmp")
                 temp.write_bytes(data)
                 os.replace(temp, CACHE_FILE)
-                raw = parsed
+                remember_list_source(url)
+                raw, source = parsed, url
                 break
             except Exception as exc:      # 網路錯誤、格式錯誤都換下一個來源
                 log(t("dl_failed", error=exc))
@@ -827,10 +891,56 @@ def load_library(force_download: bool = False, log=print) -> GameLibrary:
         if force_download or not fresh:
             log(t("using_cache"))
         raw = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        source = cached_list_source()
     library = GameLibrary.from_raw(raw, GAMES_DIR)
+    library.source = source
     if not library.games:
         raise RuntimeError(t("no_usable_games"))
     return library
+
+
+_known_lock = threading.Lock()
+
+
+def find_new_games(library, path=None) -> list:
+    """跟之前看過的遊戲比對，找出 Discord 新增的遊戲（回傳 Game 清單）。
+
+    只拿 Discord 官方清單來比（備用來源的清單比較舊，比了會誤報）。
+    第一次使用、或挑選規則改過時，只把目前的遊戲記下來，不算新遊戲。
+    """
+    if library.source != DETECTABLE_SOURCES[0]:
+        return []
+    path = KNOWN_FILE if path is None else path
+    with _known_lock:                     # 兩個背景工作同時比對時，才不會重複通知
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = None                   # 第一次使用
+        except ValueError:
+            text = ""                     # 不是正常的文字檔 → 當成壞掉
+        except OSError:
+            return []                     # 暫時讀不到（例如被防毒鎖住）→ 這次先不比，下次再說
+        known = set()
+        if text:
+            try:
+                data = json.loads(text)
+                ids = data.get("ids")
+                if data.get("rules") == GAME_RULES_VERSION and isinstance(ids, list):
+                    known = {str(x) for x in ids}
+            except (ValueError, TypeError, AttributeError):
+                pass                      # 壞掉或規則改過 → 重新記錄，這次不通知
+        current = {g.id for g in library.games}
+        new_games = [g for g in library.games if g.id not in known] if known else []
+        if not current <= known:          # 記下來的是「看過的全部」，Discord 暫時拿掉的遊戲回來也不會再通知
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temp = path.with_suffix(".tmp")
+                temp.write_text(json.dumps({"rules": GAME_RULES_VERSION, "ids": sorted(known | current)}),
+                                encoding="utf-8")
+                os.replace(temp, path)
+            except OSError:
+                return []                 # 記不下來就先不通知，免得之後每次都通知同一批
+        return new_games
 
 
 # ============================================================================
@@ -1244,6 +1354,7 @@ class State:
         self.played_ids = set()       # 款數模式已經跑完的遊戲
         self.opened_ids = set()       # 這個程式開過的所有遊戲（任何模式）
         self.bad_ids = set()          # 偵測不到或一直當掉的遊戲，之後不再挑
+        self.new_games = {}           # Discord 新增的遊戲：遊戲 ID → 發現的時間（秒）
         self.total_seconds = 0.0      # 這個程式總共掛了多久
         self.settings = dict(DEFAULT_SETTINGS)
 
@@ -1262,6 +1373,11 @@ class State:
             self.total_seconds = float(data.get("total_seconds", 0) or 0)
         except (TypeError, ValueError):
             self.total_seconds = 0.0
+        new_games = data.get("new_games")
+        if isinstance(new_games, dict):
+            self.new_games = {key: float(value) for key, value in new_games.items()
+                              if _ID_RE.fullmatch(str(key)) and type(value) in (int, float) and math.isfinite(value)}
+        self.prune_new_games()
         settings = data.get("settings")
         if isinstance(settings, dict):
             for key, default in DEFAULT_SETTINGS.items():
@@ -1273,12 +1389,16 @@ class State:
         for key in ("hours_pick", "stream_pick"):
             if self.settings[key] not in PICK_MODES:
                 self.settings[key] = "all"
+        low, high = AUTO_STOP_LIMITS
+        if not low <= self.settings["auto_stop_hours"] <= high:      # 超出範圍（或 NaN）就用預設
+            self.settings["auto_stop_hours"] = DEFAULT_SETTINGS["auto_stop_hours"]
 
     def save(self) -> None:
         data = {
             "played_ids": sorted(self.played_ids),
             "bad_ids": sorted(self.bad_ids),
             "opened_ids": sorted(self.opened_ids),
+            "new_games": {key: round(value) for key, value in sorted(self.new_games.items())},
             "total_seconds": round(self.total_seconds, 1),
             "settings": self.settings,
         }
@@ -1289,6 +1409,18 @@ class State:
             os.replace(temp, self.path)
         except OSError:
             pass
+
+    def add_new_games(self, games, now=None) -> None:
+        now = time.time() if now is None else now
+        for game in games:
+            self.new_games.setdefault(game.id, now)
+        self.prune_new_games(now)
+
+    def prune_new_games(self, now=None) -> None:
+        """發現超過 NEW_GAME_DAYS 天的遊戲就不算新遊戲了。"""
+        now = time.time() if now is None else now
+        limit = NEW_GAME_DAYS * 86400
+        self.new_games = {key: found for key, found in self.new_games.items() if now - found < limit}
 
 
 # ============================================================================
@@ -1308,6 +1440,9 @@ class Idler:
         self.parallel = 1
         self.minimized = False
         self.pick_mode = "all"            # 隨機挑遊戲的範圍：all / opened / unopened
+        self.stop_after = None            # 時數模式：本次掛到第幾秒時自動停止（None = 不會自動停止）
+        self.stop_limit = None            # 設定的自動停止時間長度（秒）
+        self.auto_stopped = None          # 上次自動停止時設定的時間長度（給介面顯示）
         self.session_seconds = 0.0
         # 款數模式
         self.queue = []
@@ -1329,7 +1464,7 @@ class Idler:
         return {fg.game.id for fg in self.slots}
 
     def pick_games(self, count: int, pick_mode: str = "all", exclude=()):
-        """依照範圍（全部／開過的／沒開過的）隨機挑 count 款，排除 exclude 和偵測不到的遊戲。"""
+        """依照範圍（全部／開過的／沒開過的／新遊戲）隨機挑 count 款，排除 exclude 和偵測不到的遊戲。"""
         exclude = set(exclude) | self.state.bad_ids
         opened = self.state.opened_ids
         pool = []
@@ -1339,6 +1474,8 @@ class Idler:
             if pick_mode == "opened" and game.id not in opened:
                 continue
             if pick_mode == "unopened" and game.id in opened:
+                continue
+            if pick_mode == "new" and game.id not in self.state.new_games:
                 continue
             pool.append(game)
         return random.sample(pool, min(max(0, int(count)), len(pool)))
@@ -1378,16 +1515,22 @@ class Idler:
 
     # ---------- 時數模式 ----------
     def start_hours(self, main_game=None, parallel: int = 1, minimized: bool = False,
-                    pick_mode: str = "all") -> bool:
+                    pick_mode: str = "all", stop_after=None) -> bool:
+        """stop_after：掛滿幾秒後自動停止（None = 一直掛到手動停止）。"""
         if not self.ready:
             return False
         self.stop(quiet=True)
+        self.auto_stopped = None
         self.parallel = max(1, min(MAX_PARALLEL, int(parallel)))
         self.minimized = bool(minimized)
         self.pick_mode = pick_mode if pick_mode in PICK_MODES else "all"
         games = [main_game] if main_game is not None else []
         need = self.parallel - len(games)
         picks = self.pick_games(need, self.pick_mode, {g.id for g in games})
+        if not games and not picks and self.pick_mode == "new":   # 新遊戲都不能用了 → 改從全部遊戲挑，才不會掛不起來
+            self.log(t("no_new_games_fallback"))
+            self.pick_mode = "all"
+            picks = self.pick_games(need, self.pick_mode)
         if len(picks) < need:
             self.log(t("only_n_matched", count=len(picks)))
         games += picks
@@ -1403,7 +1546,22 @@ class Idler:
             return False
         self._begin()
         self.log(t("hours_started", count=len(self.slots)))
+        self.set_stop_after(stop_after)
         return True
+
+    def set_stop_after(self, seconds) -> None:
+        """設定時數模式再掛幾秒後自動停止（None 或 0 = 不自動停止）。
+
+        從設定的這一刻開始倒數：開始掛時就是從頭算；掛到一半才勾或改，也是從那時候開始算，
+        不會因為已經掛很久而一勾就停。設定沒變就什麼都不做（不會重新倒數）。
+        """
+        seconds = float(seconds) if seconds else None
+        if seconds == self.stop_limit:
+            return
+        self.stop_limit = seconds
+        self.stop_after = None if seconds is None else self.session_seconds + seconds
+        if self.mode == "hours":
+            self.log(t("auto_stop_set", time=fmt_hours_minutes(seconds)) if seconds else t("auto_stop_off"))
 
     def replace_main(self):
         """時數模式：目前的主要遊戲偵測不到 → 標記起來、換一款。"""
@@ -1430,6 +1588,7 @@ class Idler:
         if not self.ready:
             return False
         self.stop(quiet=True)
+        self.auto_stopped = None
         picks = self.pick_games(count, "unopened", self.state.played_ids)
         if not picks:
             self.log(t("no_unplayed"))
@@ -1470,7 +1629,7 @@ class Idler:
         if then is not None:
             self.log(t("switch_to_hours"))
             self.start_hours(then.get("game"), then.get("parallel", 1), then.get("minimized", False),
-                             then.get("pick_mode", "all"))
+                             then.get("pick_mode", "all"), then.get("stop_after"))
 
     def variety_eta_seconds(self) -> float:
         if self.mode != "variety":
@@ -1490,6 +1649,8 @@ class Idler:
         self.queue = []
         self.mode = None
         self.then_hours = None
+        self.stop_after = None
+        self.stop_limit = None
         self._set_awake(False)
         self.state.save()
         if was_running and not quiet:
@@ -1534,7 +1695,15 @@ class Idler:
             self.session_seconds += dt
             self.state.total_seconds += dt
 
-        # 3) 款數模式：玩夠久的換下一款
+        # 3) 時數模式：掛滿設定的時間就自動停止
+        if self.mode == "hours" and self.stop_after is not None and self.session_seconds >= self.stop_after:
+            limit = self.stop_limit
+            self.stop(quiet=True)
+            self.auto_stopped = limit
+            self.log(t("auto_stopped", time=fmt_hours_minutes(limit)))
+            return
+
+        # 4) 款數模式：玩夠久的換下一款
         if self.mode == "variety":
             for fake in list(self.slots):
                 if fake.play_seconds >= self.variety_seconds:
@@ -1552,7 +1721,7 @@ class Idler:
             self.stop(quiet=True)
             return
 
-        # 4) 每分鐘存檔一次
+        # 5) 每分鐘存檔一次
         if now - self._last_save >= 60:
             self.state.save()
             self._last_save = now
@@ -1737,17 +1906,32 @@ class GamePicker(_TkFrame):
         self.hint.pack(anchor="w")
 
         saved = app.state.settings.get(mode_key, "all") if mode_key else "all"
+        if saved == "new" and not app.state.new_games:     # 新遊戲都過期了 → 改回全部遊戲（開機自動掛才挑得到遊戲）
+            saved = "all"
+            app.state.settings[mode_key] = saved
         self.cmb_filter.configure(values=self._filter_labels())
         self.cmb_filter.current(PICK_MODES.index(saved) if saved in PICK_MODES else 0)
 
     @staticmethod
     def _filter_labels():
-        return [t("filter_all"), t("filter_opened"), t("filter_unopened")]
+        return [t("filter_all"), t("filter_opened"), t("filter_unopened"), t("filter_new")]
 
     def mode(self) -> str:
-        """目前的範圍：all / opened / unopened"""
+        """目前的範圍：all / opened / unopened / new"""
         index = self.cmb_filter.current()
         return PICK_MODES[index] if 0 <= index < len(PICK_MODES) else "all"
+
+    def set_mode(self, mode: str, clear_search: bool = True) -> None:
+        """切換範圍。clear_search=True 會清掉搜尋文字（才看得到這個範圍的全部遊戲）；
+        False 則保留搜尋文字和目前選的遊戲。"""
+        keep = None if clear_search else self._selected_now()
+        self.cmb_filter.current(PICK_MODES.index(mode))
+        if clear_search:
+            self.search_var.set("")
+        if self.mode_key:
+            self.app.state.settings[self.mode_key] = self.mode()
+            self.app.state.save()
+        self.refresh(ensure=keep)
 
     def update_texts(self) -> None:
         """切換語言時更新下拉選單的文字。"""
@@ -1768,6 +1952,8 @@ class GamePicker(_TkFrame):
             return game.id in self.app.state.opened_ids
         if mode == "unopened":
             return game.id not in self.app.state.opened_ids
+        if mode == "new":
+            return game.id in self.app.state.new_games
         return True
 
     def refresh(self, ensure=None) -> None:
@@ -1781,9 +1967,10 @@ class GamePicker(_TkFrame):
         if ensure is not None and all(g.id != ensure.id for g in results):
             results = [ensure] + results[: self.MAX_SHOW - 1]
         self.shown = results
-        opened = self.app.state.opened_ids
+        opened, new_games = self.app.state.opened_ids, self.app.state.new_games
         for game in results:
-            self.listbox.insert("end", (OPENED_MARK if game.id in opened else "") + game.name)
+            marks = (OPENED_MARK if game.id in opened else "") + (NEW_MARK if game.id in new_games else "")
+            self.listbox.insert("end", marks + game.name)
         if ensure is not None:
             for index, game in enumerate(results):
                 if game.id == ensure.id:
@@ -1815,9 +2002,17 @@ class GamePicker(_TkFrame):
         """選取一款遊戲（不在目前清單裡的話會放到最上面）。"""
         self.refresh(ensure=game)
 
+    def _selected_now(self):
+        """目前選的遊戲（清單重新下載過的話，換成新清單裡的同一款；新清單沒有就回傳 None）。"""
+        game = self.selected()
+        library = self.app.library
+        if game is not None and library is not None:
+            game = library.by_id.get(game.id)
+        return game
+
     def refresh_keep(self) -> None:
-        """重新整理清單（更新「開過」記號），保留目前選的遊戲。"""
-        self.refresh(ensure=self.selected())
+        """重新整理清單（更新「開過」「新遊戲」記號），保留目前選的遊戲。"""
+        self.refresh(ensure=self._selected_now())
 
     def pick_random(self) -> None:
         if self.app.library is None:
@@ -1847,6 +2042,10 @@ class App:
         self._auto_started = False
         self._opened_seen = -1               # 用來發現「開過」名單有變動，更新清單上的記號
         self._checking = False               # 「檢查並修復」進行中
+        self._library_loading = True         # 遊戲清單下載／讀取中
+        self._library_loaded_at = time.time()  # 上次開始載入遊戲清單的時間
+        self._new_games_dialog_open = False
+        self._auto_stop_job = None           # 自動停止設定「等一下再套用」的計時器
         self._language_updaters = []         # 切換語言時要重新設定文字的元件
         self.idler = Idler(self.state, self.log)
 
@@ -1868,6 +2067,7 @@ class App:
         threading.Thread(target=self._discord_worker, daemon=True).start()
         self.root.after(200, self._poll_events)
         self.root.after(1000, self._tick)
+        self.root.after(LIST_CHECK_MS, self._auto_refresh_library)
 
     # ---------- 變數 ----------
     def _init_vars(self) -> None:
@@ -1882,6 +2082,8 @@ class App:
         self.var_then_hours = tk.BooleanVar(value=s["then_hours"])
         self.var_minimized = tk.BooleanVar(value=s["minimized"])
         self.var_auto_start = tk.BooleanVar(value=s["auto_start"])
+        self.var_auto_stop = tk.BooleanVar(value=s["auto_stop"])
+        self.var_auto_stop_hours = tk.DoubleVar(value=s["auto_stop_hours"])
         self.var_boot = tk.BooleanVar(value=get_autostart())
         self.var_stream_current = tk.IntVar(value=s["stream_current"])
 
@@ -1890,6 +2092,7 @@ class App:
                     self.var_games_buffer, self.var_minutes, self.var_variety_parallel,
                     self.var_stream_current):
             var.trace_add("write", lambda *args: self._refresh_calcs())
+        self.var_auto_stop_hours.trace_add("write", self._apply_auto_stop)    # 打字、按箭頭、滾輪都算
 
     @staticmethod
     def _int(var, default: int, low: int, high: int) -> int:
@@ -1899,6 +2102,24 @@ class App:
         except (tk.TclError, ValueError, TypeError):
             return default
         return max(low, min(high, value))
+
+    def _read_auto_stop_hours(self):
+        """自動停止輸入框裡的小時數（可以有小數）；打錯字、太小或太大就回傳 None。"""
+        try:
+            value = float(self.var_auto_stop_hours.get())
+        except (tk.TclError, ValueError, TypeError):
+            return None
+        low, high = AUTO_STOP_LIMITS
+        return value if math.isfinite(value) and low <= value <= high else None
+
+    def _auto_stop_seconds(self):
+        """有勾「掛滿幾小時後自動停止」就回傳秒數，沒勾回傳 None。輸入框打錯就用上次有效的值。"""
+        if not self.var_auto_stop.get():
+            return None
+        hours = self._read_auto_stop_hours()
+        if hours is None:
+            hours = self.state.settings["auto_stop_hours"]
+        return hours * 3600
 
     # ---------- 語言 ----------
     def translate(self, widget, key: str):
@@ -1954,9 +2175,9 @@ class App:
         try:      # 螢幕縮放 125%、150% 時，視窗跟著放大，並且不要超出螢幕
             factor = max(1.0, float(root.tk.call("tk", "scaling")) / (96 / 72))
             width = min(int(860 * factor), root.winfo_screenwidth() - 40)
-            height = min(int(740 * factor), root.winfo_screenheight() - 80)
+            height = min(int(760 * factor), root.winfo_screenheight() - 80)
         except (tk.TclError, ValueError, TypeError):
-            factor, width, height = 1.0, 860, 740
+            factor, width, height = 1.0, 860, 760
         self.wrap = int(780 * factor)            # 說明文字的換行寬度
         root.geometry(f"{width}x{height}")
         root.minsize(min(760, width), min(620, height))
@@ -1996,6 +2217,7 @@ class App:
 
         notebook = ttk.Notebook(root)
         notebook.pack(fill="both", expand=True, padx=12, pady=8)
+        self.notebook = notebook
         self._build_hours_tab(notebook)
         self._build_variety_tab(notebook)
         self._build_stream_tab(notebook)
@@ -2011,10 +2233,11 @@ class App:
 
     def _build_hours_tab(self, notebook) -> None:
         tab = ttk.Frame(notebook, padding=10)
+        self.tab_hours = tab
         self._add_tab(notebook, tab, "tab_hours")
         self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap), "hours_intro").pack(anchor="w")
 
-        self.picker_hours = GamePicker(tab, self, height=7, mode_key="hours_pick")
+        self.picker_hours = GamePicker(tab, self, height=6, mode_key="hours_pick")
         self.picker_hours.pack(fill="both", expand=True, pady=(8, 6))
 
         row = ttk.Frame(tab)
@@ -2030,6 +2253,16 @@ class App:
         ttk.Spinbox(row, from_=0, to=1000000, width=8, textvariable=self.var_hours_current).pack(side="left")
         self.lbl_hours_calc = ttk.Label(row, text="")
         self.lbl_hours_calc.pack(side="left", padx=(8, 0))
+
+        row = ttk.Frame(tab)
+        row.pack(fill="x", pady=(6, 0))
+        self.translate(ttk.Checkbutton(row, variable=self.var_auto_stop, command=self._apply_auto_stop),
+                       "auto_stop_label").pack(side="left")
+        low, high = AUTO_STOP_LIMITS
+        spin = ttk.Spinbox(row, from_=low, to=high, increment=0.5, width=7, textvariable=self.var_auto_stop_hours)
+        spin.pack(side="left", padx=(4, 0))
+        spin.bind("<FocusOut>", self._tidy_auto_stop_text)    # 數字改了會自動套用（見 _bind_traces）
+        self.translate(ttk.Label(row), "auto_stop_unit").pack(side="left", padx=(4, 0))
 
         row = ttk.Frame(tab)
         row.pack(fill="x", pady=(6, 0))
@@ -2127,7 +2360,7 @@ class App:
     def _render_help(self) -> None:
         self.txt_help.configure(state="normal")
         self.txt_help.delete("1.0", "end")
-        self.txt_help.insert("1.0", t("help_text", data_dir=DATA_DIR))
+        self.txt_help.insert("1.0", t("help_text", data_dir=DATA_DIR, days=NEW_GAME_DAYS))
         self.txt_help.configure(state="disabled")
 
     def _render_top_labels(self) -> None:
@@ -2184,7 +2417,8 @@ class App:
         messagebox.showerror(t("app_name"), t("error_dialog", error=exc_value, path=LOG_FILE))
 
     # ---------- 背景工作 ----------
-    def _setup_worker(self, force_download: bool = False, build: bool = True) -> None:
+    def _setup_worker(self, force_download: bool = False, build: bool = True, quiet: bool = False) -> None:
+        """quiet=True：背景自動更新清單，失敗時只寫紀錄、不跳錯誤視窗。"""
         post = self.events.put
         if build:
             try:
@@ -2192,9 +2426,53 @@ class App:
             except Exception as exc:
                 post(("runner_error", (str(exc), isinstance(exc, CscMissingError))))
         try:
-            post(("library_ok", load_library(force_download, log=lambda m: post(("log", m)))))
+            self._load_library_job(force_download, post)
         except Exception as exc:
-            post(("library_error", str(exc)))
+            post(("library_error", (str(exc), quiet)))
+
+    @staticmethod
+    def _load_library_job(force_download: bool, post):
+        """（背景執行緒）載入遊戲清單，再跟之前看過的比對，找出 Discord 新增的遊戲。"""
+        library = load_library(force_download, log=lambda m: post(("log", m)))
+        post(("library_ok", library))
+        try:
+            new_games = find_new_games(library)
+        except Exception:
+            write_log_file("[ERROR] " + traceback.format_exc())
+            new_games = []
+        if new_games:
+            post(("new_games", new_games))
+        return library
+
+    def _start_library_load(self, force_download: bool, quiet: bool = False) -> None:
+        self._library_loading = True
+        self._library_loaded_at = time.time()
+        self.btn_reload.configure(state="disabled")
+        threading.Thread(target=self._setup_worker, daemon=True,
+                         kwargs={"force_download": force_download, "build": False, "quiet": quiet}).start()
+
+    def _auto_refresh_library(self) -> None:
+        """程式一直開著掛機時，遊戲清單每天自動更新一次（才會發現 Discord 新增的遊戲）。"""
+        try:
+            before = len(self.state.new_games)
+            self.state.prune_new_games()
+            if len(self.state.new_games) != before and self.library is not None:   # 有遊戲過了期限，拿掉 ★
+                for picker in (self.picker_hours, self.picker_stream):
+                    if picker.mode() == "new" and not self.state.new_games:
+                        picker.set_mode("all", clear_search=False)   # 一款新遊戲都不剩了，清單才不會變空的
+                    else:
+                        picker.refresh_keep()
+            try:
+                age = time.time() - CACHE_FILE.stat().st_mtime     # 清單多久沒成功下載了
+            except OSError:
+                age = float("inf")
+            since_try = time.time() - self._library_loaded_at
+            retry = 3600 if self.library is None else LIST_RETRY_SECONDS
+            if age >= LIST_MAX_AGE and since_try >= retry and not self._library_loading:
+                self.log(t("list_auto_refresh"))
+                self._start_library_load(force_download=False, quiet=True)
+        finally:
+            self.root.after(LIST_CHECK_MS, self._auto_refresh_library)
 
     def _discord_worker(self) -> None:
         while True:
@@ -2234,24 +2512,35 @@ class App:
             if csc_missing and messagebox.askyesno(t("app_name"), t("ask_open_dotnet")):
                 webbrowser.open(DOTNET_DOWNLOAD_URL)
         elif kind == "library_ok":
+            first = self.library is None
             self.library = payload
             self.library_error = None
             self.idler.library = payload
+            self._library_loading = False
             self.btn_reload.configure(state="normal")
             self._render_top_labels()
-            self.picker_hours.refresh()
-            self.picker_stream.refresh()
-            saved = payload.by_id.get(self.state.settings.get("hours_game_id", ""))
-            if saved is not None:
-                self.picker_hours.select_game(saved)
+            if first:
+                self.picker_hours.refresh()
+                self.picker_stream.refresh()
+                saved = payload.by_id.get(self.state.settings.get("hours_game_id", ""))
+                if saved is not None:
+                    self.picker_hours.select_game(saved)
+            else:                                   # 重新下載清單：保留目前選的遊戲
+                self.picker_hours.refresh_keep()
+                self.picker_stream.refresh_keep()
             self.log(t("library_ready_log", count=len(payload.games)))
             self._maybe_autostart()
         elif kind == "library_error":
+            message, quiet = payload
+            self._library_loading = False
             self.btn_reload.configure(state="normal")
-            self.library_error = payload
+            self.library_error = message
             self._render_top_labels()
-            self.log(t("library_failed_log", error=payload))
-            messagebox.showerror(t("app_name"), payload)
+            self.log(t("library_failed_log", error=message))
+            if not quiet:
+                messagebox.showerror(t("app_name"), message)
+        elif kind == "new_games":
+            self._on_new_games(payload)
         elif kind == "discord":
             self.discord_running = payload
             self.discord_checked = True
@@ -2271,9 +2560,43 @@ class App:
             self.start_hours(confirm=False)
 
     def reload_library(self) -> None:
-        self.btn_reload.configure(state="disabled")
-        threading.Thread(target=self._setup_worker, kwargs={"force_download": True, "build": False},
-                         daemon=True).start()
+        self._start_library_load(force_download=True)
+
+    # ---------- 新遊戲 ----------
+    def _on_new_games(self, games) -> None:
+        """Discord 新增了遊戲：記下來、在清單上標記、寫紀錄，並跳出通知。"""
+        games = [game for game in games if game.id not in self.state.new_games]    # 已經通知過的不再通知
+        if not games:
+            return
+        self.state.add_new_games(games)
+        self.state.save()
+        self.picker_hours.refresh_keep()
+        self.picker_stream.refresh_keep()
+        names = [game.name for game in games]
+        short = t("sep").join(names[:10]) + (t("and_more", count=len(names) - 10) if len(names) > 10 else "")
+        self.log(t("new_games_log", count=len(names), names=short))
+        # 通知視窗用 after 另外開：視窗開著沒人按的時候，其他事件（Discord 狀態等）還是會繼續處理
+        self.root.after(0, self._ask_show_new_games, names)
+
+    def _ask_show_new_games(self, names) -> None:
+        if self._new_games_dialog_open:             # 上一個通知還沒關，就不要再疊一個
+            return
+        listed = "\n".join("• " + name for name in names[:15])
+        if len(names) > 15:
+            listed += "\n" + t("and_more", count=len(names) - 15)
+        self._new_games_dialog_open = True
+        try:
+            show = messagebox.askyesno(t("app_name"), t("new_games_dialog", count=len(names), names=listed,
+                                                        days=NEW_GAME_DAYS))
+        finally:
+            self._new_games_dialog_open = False
+        if show:
+            self.show_new_games()
+
+    def show_new_games(self) -> None:
+        """切到「遊戲時數」分頁，清單只顯示新遊戲。"""
+        self.notebook.select(self.tab_hours)
+        self.picker_hours.set_mode("new")
 
     # ---------- 每秒更新 ----------
     def _tick(self) -> None:
@@ -2333,6 +2656,8 @@ class App:
         session = fmt_duration(idler.session_seconds)
         if idler.mode == "hours":
             text = t("status_hours", count=len(idler.slots), time=session)
+            if idler.stop_after is not None:
+                text += t("status_auto_stop", time=fmt_hours_minutes(idler.stop_after - idler.session_seconds))
         elif idler.mode == "variety":
             text = t("status_variety", done=idler.variety_done, total=idler.variety_total, time=session)
         else:
@@ -2351,7 +2676,8 @@ class App:
             self.btn_hours.configure(text=t("stop_hours"))
             self.btn_swap.configure(state="normal")
         else:
-            self.lbl_hours_info.configure(text="")
+            stopped = t("auto_stopped", time=fmt_hours_minutes(idler.auto_stopped)) if idler.auto_stopped else ""
+            self.lbl_hours_info.configure(text=stopped)
             self.btn_hours.configure(text=t("start_hours"))
             self.btn_swap.configure(state="disabled")
 
@@ -2471,8 +2797,7 @@ class App:
 
         if library is None:                                    # 3) 遊戲清單：沒載入就重新下載
             try:
-                library = load_library(True, log=lambda m: post(("log", m)))
-                post(("library_ok", library))
+                library = self._load_library_job(True, post)
                 results.append(("✓", t("chk_list_fixed", count=len(library.games))))
             except Exception as exc:
                 results.append(("✗", t("chk_list_fail", error=exc)))
@@ -2526,9 +2851,32 @@ class App:
                 return
         game = self.picker_hours.selected()
         parallel = self._int(self.var_hours_parallel, 1, 1, MAX_PARALLEL)
-        if self.idler.start_hours(game, parallel, self.var_minimized.get(), self.picker_hours.mode()):
+        if self.idler.start_hours(game, parallel, self.var_minimized.get(), self.picker_hours.mode(),
+                                  self._auto_stop_seconds()):
             self._save_settings()
         self._refresh_status()
+
+    def _apply_auto_stop(self, *args) -> None:
+        """勾選或改了自動停止的時數：停 0.8 秒沒再改才套用（按住箭頭、打字到一半時不會一直套用）。"""
+        if self._auto_stop_job is not None:
+            self.root.after_cancel(self._auto_stop_job)
+        self._auto_stop_job = self.root.after(800, self._apply_auto_stop_now)
+
+    def _apply_auto_stop_now(self) -> None:
+        """記住設定；正在掛時數的話，從現在開始倒數（設定沒變就不會重新倒數）。"""
+        self._auto_stop_job = None
+        self._save_settings()
+        seconds = self._auto_stop_seconds()
+        if self.idler.mode == "hours":
+            self.idler.set_stop_after(seconds)
+        elif self.idler.mode == "variety" and self.idler.then_hours is not None:
+            self.idler.then_hours["stop_after"] = seconds          # 款數跑完接著掛時數時用
+        self._refresh_status()
+
+    def _tidy_auto_stop_text(self, event=None) -> None:
+        """離開輸入框時，打錯字或超出範圍的數字改回目前有效的值。"""
+        if self._read_auto_stop_hours() is None:
+            self.var_auto_stop_hours.set(self.state.settings["auto_stop_hours"])
 
     def swap_hours_game(self) -> None:
         if self.idler.mode != "hours":
@@ -2568,7 +2916,8 @@ class App:
             then = {"game": self.picker_hours.selected(),
                     "parallel": self._int(self.var_hours_parallel, 1, 1, MAX_PARALLEL),
                     "minimized": self.var_minimized.get(),
-                    "pick_mode": self.picker_hours.mode()}
+                    "pick_mode": self.picker_hours.mode(),
+                    "stop_after": self._auto_stop_seconds()}
         if self.idler.start_variety(need + buffer, minutes, parallel, self.var_minimized.get(), then):
             self._save_settings()
         self._refresh_status()
@@ -2670,6 +3019,10 @@ class App:
         s["then_hours"] = bool(self.var_then_hours.get())
         s["minimized"] = bool(self.var_minimized.get())
         s["auto_start"] = bool(self.var_auto_start.get())
+        s["auto_stop"] = bool(self.var_auto_stop.get())
+        hours = self._read_auto_stop_hours()
+        if hours is not None:
+            s["auto_stop_hours"] = hours
         if self.idler.mode == "hours" and self.idler.slots:
             s["hours_game_id"] = self.idler.slots[0].game.id
         else:
