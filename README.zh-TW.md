@@ -10,7 +10,7 @@
 | 遊戲款數（Sampler → … → Maverick → Polymath → Universalist，100 款以上） | 自動輪流執行沒玩過的遊戲，每款幾分鐘 |
 | 直播（Newcomer → … → Star → Phenomenon） | 開一個可以拿來直播的視窗，但一定要有人在看才會算 |
 
-介面會跟著 Windows 的顯示語言（繁體中文或英文），也可以隨時從右上角的語言選單切換。
+介面是 Discord 風格的深色主題，會跟著 Windows 的顯示語言（繁體中文或英文），也可以隨時從右上角的語言選單切換。
 
 ## 原理
 
