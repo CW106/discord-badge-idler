@@ -22,12 +22,24 @@ It doesn't need your Discord token and doesn't modify the Discord app. Nothing i
 
 ## Download
 
-- **EXE (recommended):** download `DiscordBadgeIdler.exe` from the [latest release](../../releases/latest) and run it. It doesn't need Python or any other tools. A GitHub Actions workflow compiles it to native code with Nuitka on every update.
+- **ZIP (recommended):** download `DiscordBadgeIdler.zip` from the [latest release](../../releases/latest) and extract it (right-click → **Extract All**). Then open the `DiscordBadgeIdler` folder and run `DiscordBadgeIdler.exe`. It doesn't need Python or any other tools.
+- **Single EXE:** `DiscordBadgeIdler.exe` on the same page is the whole app in one file. Antivirus programs flag it more often, because it unpacks itself to a temp folder every time it starts.
 - **Python version:** put `discord_badge_idler.py` and `start.bat` in the same folder and double-click `start.bat`. If it can't find Python 3.8+ with tkinter, it offers to install it for you.
 
-Either way you need Windows 10 or 11 and the Discord desktop app, open and signed in.
+A GitHub Actions workflow compiles the ZIP and EXE versions to native code with Nuitka on every update. All versions need Windows 10 or 11 and the Discord desktop app, open and signed in.
 
 Older versions (v1.2 and later) are on the [Releases](../../releases) page, and [CHANGELOG.md](CHANGELOG.md) lists what changed in each one.
+
+### If your antivirus blocks it
+
+It's a false positive. The app isn't digitally signed, and it starts a small program under game names so that Discord detects it, which looks like something malware would do. That's why Windows Defender and other antivirus programs sometimes flag it. All the code is in this repository, and GitHub Actions builds every download from it.
+
+On VirusTotal, 2 of 65 antivirus engines flagged the v1.6 ZIP ([results](https://www.virustotal.com/gui/file/37f3bad70830aae5448a23d47cc29bb6f1061243d5a3eb855670e8cafdf56d49)), while 19 of 71 flagged the single EXE, including Microsoft Defender as `Trojan:Win32/Wacatac.B!ml` ([results](https://www.virustotal.com/gui/file/e830a56d10b3c42b3c83cbb263a6e2a84ea7968bb409c43970a57cdd1b86bf0a)).
+
+- Use the ZIP version. Antivirus programs flag it much less often than the single EXE.
+- If Windows Security removed the file, open **Windows Security → Virus & threat protection → Protection history**, select the entry, choose **Actions → Allow on device**, then download it again.
+- If **Windows protected your PC** appears when you open it, click **More info → Run anyway**.
+- You can also use the Python version, which runs the source code directly.
 
 ## Usage
 

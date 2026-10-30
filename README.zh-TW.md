@@ -22,12 +22,24 @@
 
 ## 下載
 
-- **exe 版（推薦）**：到[最新版本](../../releases/latest)下載 `DiscordBadgeIdler.exe`，直接執行就好，不需要 Python 或其他工具。每次更新時，GitHub Actions 都會用 Nuitka 把程式編譯成原生程式。
+- **ZIP 版（推薦）**：到[最新版本](../../releases/latest)下載 `DiscordBadgeIdler.zip`，按右鍵選「全部解壓縮」，再打開 `DiscordBadgeIdler` 資料夾，執行裡面的 `DiscordBadgeIdler.exe`。不需要 Python 或其他工具。
+- **單一 EXE 版**：同一頁的 `DiscordBadgeIdler.exe` 把整個程式包成一個檔案。因為它每次開啟都會先把自己解壓縮到暫存資料夾，比較容易被防毒軟體誤判。
 - **Python 版**：把 `discord_badge_idler.py` 和 `start.bat` 放在同一個資料夾，雙擊 `start.bat`。如果找不到含 tkinter 的 Python 3.8 以上版本，它會問你要不要自動安裝。
 
-兩種版本都需要 Windows 10 或 11，以及開著並保持登入的 Discord 電腦版。
+ZIP 版和 EXE 版都是每次更新時由 GitHub Actions 用 Nuitka 編譯成的原生程式。每種版本都需要 Windows 10 或 11，以及開著並保持登入的 Discord 電腦版。
 
 舊版本（v1.2 起）都可以在 [Releases](../../releases) 頁面下載，每個版本改了什麼請看[更新紀錄](CHANGELOG.md)。
+
+### 被防毒擋下怎麼辦
+
+這是誤判。程式沒有數位簽章，而且會用遊戲的名字執行一個小程式讓 Discord 偵測到，這種行為看起來很像惡意程式，所以 Windows Defender 等防毒軟體有時會把它當成病毒。程式碼全部公開在這個 repo，每個下載檔都是 GitHub Actions 從這些程式碼編譯出來的。
+
+用 VirusTotal 檢查 v1.6：ZIP 版 65 家防毒只有 2 家誤判（[報告](https://www.virustotal.com/gui/file/37f3bad70830aae5448a23d47cc29bb6f1061243d5a3eb855670e8cafdf56d49)），單一 EXE 則有 71 家中的 19 家誤判（[報告](https://www.virustotal.com/gui/file/e830a56d10b3c42b3c83cbb263a6e2a84ea7968bb409c43970a57cdd1b86bf0a)），包括 Microsoft Defender，它把程式判成 `Trojan:Win32/Wacatac.B!ml`。
+
+- 改用 ZIP 版，它被防毒擋的機會比單一 EXE 小很多。
+- 檔案被 Windows 安全性刪掉的話：打開「Windows 安全性 → 病毒與威脅防護 → 保護歷程記錄」，點那一筆紀錄，選「動作 → 允許在裝置上」，再重新下載。
+- 開啟時出現「Windows 已保護您的電腦」：按「其他資訊 → 仍要執行」。
+- 也可以改用 Python 版，直接執行原始碼。
 
 ## 使用方式
 
