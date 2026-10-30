@@ -82,3 +82,7 @@ ZIP 版和 EXE 版都是每次更新時由 GitHub Actions 用 Nuitka 編譯成�
 ## 免責聲明
 
 假造遊戲活動可能違反 Discord 服務條款，可能導致徽章被重置或帳號被處分，請自行承擔風險。本專案與 Discord 沒有任何關係，也沒有得到 Discord 的認可。
+
+## 授權
+
+本專案採用 [MIT 授權](LICENSE)。

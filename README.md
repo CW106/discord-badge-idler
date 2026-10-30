@@ -82,3 +82,7 @@ The app keeps its files (dummy executables, the cached game list, settings and a
 ## Disclaimer
 
 Faking game activity may violate Discord's Terms of Service and could lead to badge resets or action against your account. Use it at your own risk. This project isn't affiliated with or endorsed by Discord.
+
+## License
+
+[MIT License](LICENSE)
