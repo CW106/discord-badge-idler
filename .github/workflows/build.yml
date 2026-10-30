@@ -13,7 +13,7 @@ on:
         required: false
         default: ""
       exe:
-        description: "Build the EXE (versions before 1.3 have no EXE build)"
+        description: "Build the ZIP and EXE (versions before 1.3 can't be built)"
         type: boolean
         default: true
       latest:
@@ -69,7 +69,7 @@ jobs:
         if: env.BUILD_EXE == 'true'
         run: python -m pip install --upgrade nuitka ordered-set zstandard
 
-      - name: Compile the app with Nuitka
+      - name: Compile the app with Nuitka (ZIP folder and single EXE)
         if: env.BUILD_EXE == 'true'
         shell: pwsh
         working-directory: src
@@ -78,8 +78,7 @@ jobs:
           while ($parts.Count -lt 4) { $parts += "0" }
           $fileVersion = $parts[0..3] -join "."
           Write-Host "Building version $env:APP_VERSION ($fileVersion)"
-          $nuitkaArgs = @(
-            "--onefile",
+          $common = @(
             "--assume-yes-for-downloads",
             "--enable-plugin=tk-inter",
             "--windows-console-mode=disable",
@@ -89,55 +88,85 @@ jobs:
             "--file-description=DiscordBadgeIdler",
             "--file-version=$fileVersion",
             "--product-version=$fileVersion",
-            "--output-dir=build",
             "--output-filename=DiscordBadgeIdler.exe"
           )
           $hasIcon = python -c "import discord_badge_idler as m; print(hasattr(m, 'make_icon_ico'))"
           if ("$hasIcon".Trim() -eq "True") {
             python -c "import pathlib, discord_badge_idler as m; pathlib.Path('app.ico').write_bytes(m.make_icon_ico())"
             if ($LASTEXITCODE -ne 0) { throw "Couldn't make the icon" }
-            $nuitkaArgs += "--windows-icon-from-ico=app.ico"
+            $common += "--windows-icon-from-ico=app.ico"
           }
-          $nuitkaArgs += "discord_badge_idler.py"
-          python -m nuitka @nuitkaArgs
-          if ($LASTEXITCODE -ne 0) { throw "Nuitka failed" }
 
-      - name: Smoke test (start the EXE and check it works)
+          # Folder version, shipped as a ZIP. It runs in place, so antivirus programs flag it less often.
+          python -m nuitka --standalone @common --output-dir=folder discord_badge_idler.py
+          if ($LASTEXITCODE -ne 0) { throw "Nuitka (folder version) failed" }
+          Rename-Item folder/discord_badge_idler.dist DiscordBadgeIdler
+          New-Item -ItemType Directory -Force build | Out-Null
+          Compress-Archive -Path folder/DiscordBadgeIdler -DestinationPath build/DiscordBadgeIdler.zip
+
+          # Single EXE. It unpacks itself to a temp folder every time it starts.
+          python -m nuitka --onefile @common --output-dir=build discord_badge_idler.py
+          if ($LASTEXITCODE -ne 0) { throw "Nuitka (single EXE) failed" }
+          Get-ChildItem build -File | Format-Table Name, Length
+
+      - name: Smoke test (start both versions and check they work)
         if: env.BUILD_EXE == 'true'
         shell: pwsh
         working-directory: src
         run: |
-          $data = Join-Path $env:RUNNER_TEMP "smoke"
-          $env:BADGE_IDLER_DATA = $data
-          $env:BADGE_IDLER_LANG = "en"
-          Start-Process -FilePath (Join-Path (Get-Location) "build\DiscordBadgeIdler.exe")
-          $log = Join-Path $data "log.txt"
-          $ok = $false
-          for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
-            Start-Sleep -Seconds 2
-            $ok = (Test-Path $log) -and (Select-String -Path $log -SimpleMatch "bundled with the app" -Quiet)
+          $unzipped = Join-Path $env:RUNNER_TEMP "unzipped"
+          Expand-Archive build/DiscordBadgeIdler.zip -DestinationPath $unzipped
+          $targets = [ordered]@{
+            "ZIP folder" = (Join-Path $unzipped "DiscordBadgeIdler\DiscordBadgeIdler.exe")
+            "single EXE" = (Join-Path (Get-Location) "build\DiscordBadgeIdler.exe")
           }
-          if (Test-Path $log) { Get-Content $log }
-          $crash = Join-Path $data "crash_log.txt"
-          if (Test-Path $crash) { Get-Content $crash; $ok = $false }
-          $app = @(Get-Process -Name DiscordBadgeIdler -ErrorAction SilentlyContinue)
-          if ($app.Count -eq 0) { Write-Host "The app is not running."; $ok = $false }
-          $runner = Join-Path $data "runner\BadgeIdlerRunner.exe"
-          if (Test-Path $runner) {
-            $game = Start-Process -FilePath $runner -ArgumentList "--title", "SmokeTest" -PassThru
-            Start-Sleep -Seconds 3
-            if ($game.HasExited) { Write-Host "The dummy game runner exited early."; $ok = $false } else { Stop-Process -Id $game.Id -Force }
-          } else { Write-Host "The dummy game runner was not set up."; $ok = $false }
-          $app | Stop-Process -Force -ErrorAction SilentlyContinue
-          if (-not $ok) { throw "Smoke test failed" }
+          $env:BADGE_IDLER_LANG = "en"
+          $failed = @()
+          $n = 0
+          foreach ($name in $targets.Keys) {
+            $n++
+            $exe = $targets[$name]
+            Write-Host "=== $name ($exe)"
+            $data = Join-Path $env:RUNNER_TEMP "smoke$n"
+            $env:BADGE_IDLER_DATA = $data
+            $ok = $false
+            if (Test-Path $exe) {
+              Start-Process -FilePath $exe
+              $log = Join-Path $data "log.txt"
+              for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
+                Start-Sleep -Seconds 2
+                $ok = (Test-Path $log) -and (Select-String -Path $log -SimpleMatch "bundled with the app" -Quiet)
+              }
+              if (Test-Path $log) { Get-Content $log }
+              $crash = Join-Path $data "crash_log.txt"
+              if (Test-Path $crash) { Get-Content $crash; $ok = $false }
+              $app = @(Get-Process -Name DiscordBadgeIdler -ErrorAction SilentlyContinue)
+              if ($app.Count -eq 0) { Write-Host "The app is not running."; $ok = $false }
+              $runner = Join-Path $data "runner\BadgeIdlerRunner.exe"
+              if (Test-Path $runner) {
+                $game = Start-Process -FilePath $runner -ArgumentList "--title", "SmokeTest" -PassThru
+                Start-Sleep -Seconds 3
+                if ($game.HasExited) { Write-Host "The dummy game runner exited early."; $ok = $false } else { Stop-Process -Id $game.Id -Force }
+              } else { Write-Host "The dummy game runner was not set up."; $ok = $false }
+              $app | Stop-Process -Force -ErrorAction SilentlyContinue
+              for ($i = 0; $i -lt 10 -and @(Get-Process -Name DiscordBadgeIdler -ErrorAction SilentlyContinue).Count -gt 0; $i++) {
+                Get-Process -Name DiscordBadgeIdler -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 1
+              }
+            } else { Write-Host "Missing: $exe" }
+            if ($ok) { Write-Host "$name passed." } else { $failed += $name }
+          }
+          if ($failed.Count -gt 0) { throw "Smoke test failed: $($failed -join ', ')" }
           Write-Host "Smoke test passed."
 
-      - name: Upload the EXE as a build artifact
+      - name: Upload the builds as an artifact
         if: env.BUILD_EXE == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: DiscordBadgeIdler-v${{ env.APP_VERSION }}
-          path: src/build/DiscordBadgeIdler.exe
+          path: |
+            src/build/DiscordBadgeIdler.zip
+            src/build/DiscordBadgeIdler.exe
 
       - name: Publish the release for this version
         shell: pwsh
@@ -159,8 +188,9 @@ jobs:
           $notes.Add("")
           $notes.Add("---")
           if ($env:BUILD_EXE -eq 'true') {
-            $notes.Add("下載下面的 **DiscordBadgeIdler.exe** 直接執行（Windows 10／11）。")
-            $notes.Add("Download **DiscordBadgeIdler.exe** below and run it (Windows 10/11).")
+            $notes.Add("**推薦下載 DiscordBadgeIdler.zip**：解壓縮後，打開資料夾裡的 DiscordBadgeIdler.exe（Windows 10／11）。單一檔案的 DiscordBadgeIdler.exe 也能用，但比較容易被防毒軟體誤判成病毒。被擋下的話請看 [README](https://github.com/CW106/discord-badge-idler/blob/main/README.zh-TW.md#被防毒擋下怎麼辦)。")
+            $notes.Add("")
+            $notes.Add("**Recommended: DiscordBadgeIdler.zip.** Extract it and run DiscordBadgeIdler.exe in the folder (Windows 10/11). The single-file DiscordBadgeIdler.exe works too, but antivirus programs flag it more often. If it gets blocked, see the [README](https://github.com/CW106/discord-badge-idler/blob/main/README.md#if-your-antivirus-blocks-it).")
           } else {
             $notes.Add("這個版本只有 Python 版：下載下面的 Source code，解壓縮後雙擊 start.bat（需要 Python 3）。")
             $notes.Add("Python only: download the source code below, unzip it and double-click start.bat (needs Python 3).")
@@ -177,12 +207,12 @@ jobs:
             gh release edit $tag -R $env:GITHUB_REPOSITORY --title $title --notes-file $notesFile $latest
             if ($LASTEXITCODE -ne 0) { throw "Couldn't update the release" }
             if ($env:BUILD_EXE -eq 'true') {
-              gh release upload $tag src/build/DiscordBadgeIdler.exe --clobber -R $env:GITHUB_REPOSITORY
-              if ($LASTEXITCODE -ne 0) { throw "Couldn't upload the EXE" }
+              gh release upload $tag src/build/DiscordBadgeIdler.zip src/build/DiscordBadgeIdler.exe --clobber -R $env:GITHUB_REPOSITORY
+              if ($LASTEXITCODE -ne 0) { throw "Couldn't upload the files" }
             }
           } else {
             $files = @()
-            if ($env:BUILD_EXE -eq 'true') { $files = @("src/build/DiscordBadgeIdler.exe") }
+            if ($env:BUILD_EXE -eq 'true') { $files = @("src/build/DiscordBadgeIdler.zip", "src/build/DiscordBadgeIdler.exe") }
             gh release create $tag @files -R $env:GITHUB_REPOSITORY --title $title --notes-file $notesFile --target $env:APP_COMMIT $latest
             if ($LASTEXITCODE -ne 0) { throw "Couldn't create the release" }
           }
