@@ -2041,6 +2041,46 @@ def enable_dpi_awareness() -> None:
 _TkFrame = ttk.Frame if tk is not None else object
 
 
+class ScrollableTab(_TkFrame):
+    """分頁的捲動容器：內容放得下就跟以前一樣（會跟著視窗拉長），放不下（矮螢幕、高縮放比例）
+    就出現右邊的捲軸，內容不會再被擠扁或切掉。要放東西請放進 .body。"""
+
+    def __init__(self, master, padding=(16, 14)):
+        super().__init__(master)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        self.canvas = tk.Canvas(self, background=COLORS["panel"], highlightthickness=0, borderwidth=0,
+                                yscrollincrement=30)
+        self.bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.bar.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.bar.grid(row=0, column=1, sticky="ns")
+        self.bar.grid_remove()                      # 放得下的時候不顯示捲軸
+        self.body = ttk.Frame(self.canvas, padding=padding)
+        self._window = self.canvas.create_window(0, 0, window=self.body, anchor="nw")
+        self.body.bind("<Configure>", self._fit)
+        self.canvas.bind("<Configure>", self._fit)
+
+    def _fit(self, event=None) -> None:
+        width, height = self.canvas.winfo_width(), self.canvas.winfo_height()
+        need = self.body.winfo_reqheight()
+        full = max(need, height)                    # 空間夠就撐滿（清單會跟著變長），不夠就用內容需要的高度
+        self.canvas.itemconfigure(self._window, width=width, height=full)
+        self.canvas.configure(scrollregion=(0, 0, width, full))
+        if need > height + 1:
+            self.bar.grid()
+        else:
+            self.bar.grid_remove()
+            self.canvas.yview_moveto(0)
+
+    def scrollable(self) -> bool:
+        return self.body.winfo_reqheight() > self.canvas.winfo_height() + 1
+
+    def scroll(self, event) -> None:
+        if self.scrollable() and event.delta:
+            self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+
 class GamePicker(_TkFrame):
     """搜尋框＋遊戲清單，讓使用者挑一款遊戲。"""
     MAX_SHOW = 300
@@ -2225,6 +2265,7 @@ class App:
         self.apply_language()
         self.root.report_callback_exception = self._report_error
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
 
         if self.var_boot.get():
             try:
@@ -2239,6 +2280,20 @@ class App:
         self.root.after(1000, self._tick)
         self.root.after(LIST_CHECK_MS, self._auto_refresh_library)
         self.root.after(50, lambda: use_dark_title_bar(self.root))
+
+    def _on_mousewheel(self, event) -> None:
+        """滑鼠滾輪：游標在可捲動的分頁上就捲動分頁；在清單、下拉選單、數字框上則交給它們自己處理。"""
+        try:
+            widget = self.root.winfo_containing(event.x_root, event.y_root)
+        except (KeyError, tk.TclError):
+            return
+        if widget is None or widget.winfo_class() in ("Listbox", "Text", "TCombobox", "TSpinbox"):
+            return
+        while widget is not None:
+            if isinstance(widget, ScrollableTab):
+                widget.scroll(event)
+                return
+            widget = getattr(widget, "master", None)
 
     # ---------- 變數 ----------
     def _init_vars(self) -> None:
@@ -2563,9 +2618,10 @@ class App:
         self._build_help_tab(notebook)
 
     def _build_hours_tab(self, notebook) -> None:
-        tab = ttk.Frame(notebook, padding=(16, 14))
-        self.tab_hours = tab
-        self._add_tab(notebook, tab, "tab_hours")
+        outer = ScrollableTab(notebook)
+        tab = outer.body
+        self.tab_hours = outer
+        self._add_tab(notebook, outer, "tab_hours")
         self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap, style="Muted.TLabel"),
                        "hours_intro").pack(anchor="w")
 
@@ -2617,10 +2673,19 @@ class App:
         self.picker_hours.pack(fill="both", expand=True, pady=(12, 0))
 
     def _build_variety_tab(self, notebook) -> None:
-        tab = ttk.Frame(notebook, padding=(16, 14))
-        self._add_tab(notebook, tab, "tab_variety")
+        outer = ScrollableTab(notebook)
+        tab = outer.body
+        self._add_tab(notebook, outer, "tab_variety")
         self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap, style="Muted.TLabel"),
                        "variety_intro").pack(anchor="w")
+
+        # LOCAL PATCH: the Start/Stop button row used to sit below the settings, where it could be clipped
+        # on small or high-scaling screens. It now sits right under the intro text so it is always visible.
+        row = ttk.Frame(tab)
+        row.pack(fill="x", pady=(12, 0))
+        self.btn_variety = ttk.Button(row, command=self.toggle_variety, style="Accent.TButton")
+        self.btn_variety.pack(side="left")
+        self.translate(ttk.Button(row, command=self.clear_played), "clear_played").pack(side="left", padx=(8, 0))
 
         grid = ttk.Frame(tab)
         grid.pack(fill="x", pady=(12, 0))
@@ -2640,12 +2705,6 @@ class App:
         self.lbl_variety_plan.pack(anchor="w", pady=(10, 0))
         self.translate(ttk.Checkbutton(tab, variable=self.var_then_hours), "then_hours").pack(anchor="w", pady=(8, 0))
 
-        row = ttk.Frame(tab)
-        row.pack(fill="x", pady=(14, 0))
-        self.btn_variety = ttk.Button(row, command=self.toggle_variety, style="Accent.TButton")
-        self.btn_variety.pack(side="left")
-        self.translate(ttk.Button(row, command=self.clear_played), "clear_played").pack(side="left", padx=(8, 0))
-
         self.progress = ttk.Progressbar(tab, mode="determinate", maximum=1)
         self.progress.pack(fill="x", pady=(14, 0))
         self.lbl_variety_info = ttk.Label(tab, text="", wraplength=self.wrap, justify="left")
@@ -2654,8 +2713,9 @@ class App:
         self.lbl_played.pack(anchor="w", pady=(4, 0))
 
     def _build_stream_tab(self, notebook) -> None:
-        tab = ttk.Frame(notebook, padding=(16, 14))
-        self._add_tab(notebook, tab, "tab_stream")
+        outer = ScrollableTab(notebook)
+        tab = outer.body
+        self._add_tab(notebook, outer, "tab_stream")
         self.translate(ttk.Label(tab, justify="left", wraplength=self.wrap, style="Muted.TLabel"),
                        "stream_intro").pack(anchor="w")
 
